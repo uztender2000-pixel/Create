@@ -46,8 +46,13 @@ async function importFeed(feedUrl) {
   const parsed = await parseStringPromise(xml, { explicitArray: true, trim: true });
 
   const tree = buildCategoryTree(parsed);
+  const treeSize = Object.keys(tree).length;
+  const sampleEntry = Object.entries(tree)[0];
+  console.log(`[feed sync] [DEBUG] ${feedUrl} — category tree has ${treeSize} entries. Sample:`, sampleEntry);
+
   const offers = parsed?.yml_catalog?.shop?.[0]?.offers?.[0]?.offer || [];
   let upserted = 0;
+  let loggedFirstOffer = false;
 
   for (const offer of offers) {
     const id = offer.$.id;
@@ -58,6 +63,11 @@ async function importFeed(feedUrl) {
     const categoryId = offer.categoryId?.[0] || null;
     const categoryName = categoryId ? (tree[categoryId]?.name || null) : null;
     const section = categoryId ? findSectionName(categoryId, tree) : null;
+
+    if (!loggedFirstOffer) {
+      console.log(`[feed sync] [DEBUG] first offer categoryId="${categoryId}" (type: ${typeof categoryId}) -> categoryName="${categoryName}", section="${section}"`);
+      loggedFirstOffer = true;
+    }
     const vendor = offer.vendor?.[0] || null;
     const picture = Array.isArray(offer.picture) ? offer.picture[0] : null;
     const defaultRetailPrice = roundRetailPrice(price);
