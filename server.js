@@ -7,6 +7,8 @@ const { pool, initSchema } = require('./db');
 const { syncAllFeeds } = require('./services/feedImporter');
 const productsRouter = require('./routes/products');
 const ordersRouter = require('./routes/orders');
+const authRouter = require('./routes/auth');
+const cartRouter = require('./routes/cart');
 
 const app = express();
 app.use(cors());
@@ -18,6 +20,8 @@ app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOStri
 
 app.use('/api/products', productsRouter);
 app.use('/api/orders', ordersRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/cart', cartRouter);
 
 const PORT = process.env.PORT || 3000;
 

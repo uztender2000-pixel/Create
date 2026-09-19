@@ -36,8 +36,28 @@ async function initSchema() {
       comment         TEXT,
       status          TEXT DEFAULT 'new',    -- new -> confirmed -> ordered_from_supplier -> shipped -> done
       ttn             TEXT,                  -- tracking number, filled in once you ship
+      user_id         INTEGER,               -- who placed it, if logged in (NULL for guest checkout)
       created_at      TIMESTAMPTZ DEFAULT now()
     );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id            SERIAL PRIMARY KEY,
+      name          TEXT NOT NULL,
+      email         TEXT UNIQUE NOT NULL,
+      phone         TEXT,
+      password_hash TEXT NOT NULL,
+      created_at    TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS cart_items (
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      product_id  TEXT NOT NULL REFERENCES products(id),
+      quantity    INTEGER NOT NULL DEFAULT 1,
+      added_at    TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (user_id, product_id)
+    );
+
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INTEGER;
 
     -- Safe on a table that already existed before this update: adds the two
     -- new columns without touching any existing data.
