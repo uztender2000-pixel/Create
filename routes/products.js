@@ -3,11 +3,17 @@ const { pool } = require('../db');
 
 const router = express.Router();
 
-// GET /api/products — list available products. Add ?featured=true to get
-// just your 3 test finalists (mark them with the SQL snippet in README).
+// GET /api/products — list available products, paginated.
+// ?featured=true       -> just your 3 test finalists
+// ?category_id=...     -> filter by category
+// ?page=1&limit=24     -> pagination (defaults: page 1, 24 per page, max 100 per page)
 router.get('/', async (req, res) => {
   try {
     const { featured, category_id } = req.query;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
+    const offset = (page - 1) * limit;
+
     const conditions = ['available = true'];
     const params = [];
 
@@ -18,18 +24,49 @@ router.get('/', async (req, res) => {
       params.push(category_id);
       conditions.push(`category_id = $${params.length}`);
     }
+    const where = conditions.join(' AND ');
 
+    const { rows: countRows } = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM products WHERE ${where}`,
+      params
+    );
+    const total = countRows[0].total;
+
+    const dataParams = [...params, limit, offset];
     const { rows } = await pool.query(
       `SELECT id, name, description, retail_price, price, picture_url, vendor, category_id
        FROM products
-       WHERE ${conditions.join(' AND ')}
-       ORDER BY updated_at DESC`,
-      params
+       WHERE ${where}
+       ORDER BY updated_at DESC
+       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+      dataParams
+    );
+
+    res.json({
+      products: rows,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load products' });
+  }
+});
+
+// GET /api/products/categories — distinct category ids currently in stock,
+// with a product count each. Useful for building a category filter menu.
+router.get('/meta/categories', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT category_id, COUNT(*)::int AS count
+       FROM products
+       WHERE available = true AND category_id IS NOT NULL
+       GROUP BY category_id
+       ORDER BY count DESC`
     );
     res.json(rows);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to load products' });
+    res.status(500).json({ error: 'Failed to load categories' });
   }
 });
 
