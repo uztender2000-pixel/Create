@@ -4,12 +4,13 @@ const { pool } = require('../db');
 const router = express.Router();
 
 // GET /api/products — list available products, paginated.
-// ?featured=true       -> just your 3 test finalists
-// ?category_id=...     -> filter by category
+// ?featured=true       -> just your test finalists
+// ?section=...         -> filter by top-level section (e.g. "Зоотовари")
+// ?category_id=...     -> filter by specific category within a section
 // ?page=1&limit=24     -> pagination (defaults: page 1, 24 per page, max 100 per page)
 router.get('/', async (req, res) => {
   try {
-    const { featured, category_id } = req.query;
+    const { featured, section, category_id } = req.query;
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
     const offset = (page - 1) * limit;
@@ -19,6 +20,10 @@ router.get('/', async (req, res) => {
 
     if (featured === 'true') {
       conditions.push('featured = true');
+    }
+    if (section) {
+      params.push(section);
+      conditions.push(`section = $${params.length}`);
     }
     if (category_id) {
       params.push(category_id);
@@ -34,7 +39,7 @@ router.get('/', async (req, res) => {
 
     const dataParams = [...params, limit, offset];
     const { rows } = await pool.query(
-      `SELECT id, name, description, retail_price, price, picture_url, vendor, category_id
+      `SELECT id, name, description, retail_price, price, picture_url, vendor, category_id, category_name, section
        FROM products
        WHERE ${where}
        ORDER BY updated_at DESC
@@ -52,16 +57,43 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/products/categories — distinct category ids currently in stock,
-// with a product count each. Useful for building a category filter menu.
-router.get('/meta/categories', async (req, res) => {
+// GET /api/products/meta/sections — top-level sections (from your 5 feeds)
+// with a product count each. Use this to build the first level of nav.
+router.get('/meta/sections', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT category_id, COUNT(*)::int AS count
+      `SELECT section, COUNT(*)::int AS count
        FROM products
-       WHERE available = true AND category_id IS NOT NULL
-       GROUP BY category_id
+       WHERE available = true AND section IS NOT NULL
+       GROUP BY section
        ORDER BY count DESC`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load sections' });
+  }
+});
+
+// GET /api/products/meta/categories — categories with product counts.
+// Add ?section=... to scope it to one section (second level of nav).
+router.get('/meta/categories', async (req, res) => {
+  try {
+    const { section } = req.query;
+    const conditions = ['available = true', 'category_id IS NOT NULL'];
+    const params = [];
+    if (section) {
+      params.push(section);
+      conditions.push(`section = $${params.length}`);
+    }
+
+    const { rows } = await pool.query(
+      `SELECT category_id, category_name, section, COUNT(*)::int AS count
+       FROM products
+       WHERE ${conditions.join(' AND ')}
+       GROUP BY category_id, category_name, section
+       ORDER BY count DESC`,
+      params
     );
     res.json(rows);
   } catch (err) {
@@ -83,7 +115,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // PATCH /api/products/:id/retail-price — set your own selling price on top
-// of the supplier's cost price. Call this once per finalist before going live.
+// of the supplier's cost price.
 router.patch('/:id/retail-price', async (req, res) => {
   try {
     const { retail_price, featured } = req.body;
