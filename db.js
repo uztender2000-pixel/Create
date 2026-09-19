@@ -6,7 +6,8 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
-// Creates the tables if they don't exist yet. Safe to run on every boot.
+// Creates the tables if they don't exist yet, and adds any new columns to
+// an already-existing table. Safe to run on every boot.
 async function initSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS products (
@@ -14,8 +15,10 @@ async function initSchema() {
       name          TEXT NOT NULL,
       description   TEXT,
       price         NUMERIC NOT NULL,        -- your cost from the supplier (drop price)
-      retail_price  NUMERIC,                 -- what you actually sell it for — set manually
+      retail_price  NUMERIC,                 -- what you actually sell it for
       category_id   TEXT,
+      category_name TEXT,                    -- human-readable category, parsed from the feed
+      section       TEXT,                    -- top-level section, e.g. "Зоотовари", "Дім", "Парфумерія"
       picture_url   TEXT,
       vendor        TEXT,
       available     BOOLEAN DEFAULT true,
@@ -35,6 +38,11 @@ async function initSchema() {
       ttn             TEXT,                  -- tracking number, filled in once you ship
       created_at      TIMESTAMPTZ DEFAULT now()
     );
+
+    -- Safe on a table that already existed before this update: adds the two
+    -- new columns without touching any existing data.
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS category_name TEXT;
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS section TEXT;
   `);
 }
 
