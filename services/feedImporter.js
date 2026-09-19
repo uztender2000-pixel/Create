@@ -6,34 +6,46 @@ const { pool } = require('../db');
 // you set manually (e.g. via the /retail-price endpoint for your finalists).
 const DEFAULT_MARKUP = 1.2;
 
-// Rounds up to the nearest 10 UAH so prices look like normal retail prices.
 function roundRetailPrice(cost) {
   return Math.ceil((cost * DEFAULT_MARKUP) / 10) * 10;
 }
 
-// dropshipping.ua feeds include a <categories> block that maps each
-// categoryId to a human-readable name — e.g. <category id="3422">Нашийники</category>.
-// This reads that block into a plain { id: name } map.
-function buildCategoryMap(parsed) {
+// dropshipping.ua feeds include a <categories> block that's a full tree:
+// <category id="841">Зоотовари</category>
+// <category id="3412" parentId="841">Одяг для домашніх тварин</category>
+// <category id="3417" parentId="3412">Комбінезони для тварин</category>
+// This reads it into { id: { name, parentId } } so we can walk it.
+function buildCategoryTree(parsed) {
   const rawCategories = parsed?.yml_catalog?.shop?.[0]?.categories?.[0]?.category || [];
-  const map = {};
+  const tree = {};
   for (const cat of rawCategories) {
     const id = cat?.$?.id;
-    // xml2js puts the text content under `_` when the element also has attributes.
+    const parentId = cat?.$?.parentId || null;
     const name = typeof cat === 'object' ? (cat._ || '').trim() : String(cat).trim();
-    if (id) map[id] = name;
+    if (id) tree[id] = { name, parentId };
   }
-  return map;
+  return tree;
 }
 
-// Imports one feed. `section` is the human label you choose for this feed
-// as a whole (e.g. "Зоотовари", "Дім", "Парфумерія") — stored on every
-// product from this feed so the site can group by section.
-async function importFeed(feedUrl, section) {
+// Walks up parentId links from a leaf category to find the top-level
+// section (the ancestor with no parentId) — e.g. "3417" (Комбінезони) ->
+// "3412" (Одяг) -> "841" (Зоотовари). Returns that root's name.
+// This is what lets the site auto-sort products into sections without you
+// telling it which section each feed belongs to.
+function findSectionName(categoryId, tree, depth = 0) {
+  const node = tree[categoryId];
+  if (!node || depth > 10) return null; // depth guard against malformed/circular data
+  if (!node.parentId) return node.name; // this IS the root — it's the section
+  return findSectionName(node.parentId, tree, depth + 1);
+}
+
+// Imports one feed. Section and category name are derived automatically
+// from the feed's own category tree — no manual labeling needed.
+async function importFeed(feedUrl) {
   const { data: xml } = await axios.get(feedUrl, { timeout: 30000 });
   const parsed = await parseStringPromise(xml, { explicitArray: true, trim: true });
 
-  const categoryMap = buildCategoryMap(parsed);
+  const tree = buildCategoryTree(parsed);
   const offers = parsed?.yml_catalog?.shop?.[0]?.offers?.[0]?.offer || [];
   let upserted = 0;
 
@@ -44,7 +56,8 @@ async function importFeed(feedUrl, section) {
     const name = offer.name?.[0] || '';
     const description = offer.description?.[0] || '';
     const categoryId = offer.categoryId?.[0] || null;
-    const categoryName = categoryId ? (categoryMap[categoryId] || null) : null;
+    const categoryName = categoryId ? (tree[categoryId]?.name || null) : null;
+    const section = categoryId ? findSectionName(categoryId, tree) : null;
     const vendor = offer.vendor?.[0] || null;
     const picture = Array.isArray(offer.picture) ? offer.picture[0] : null;
     const defaultRetailPrice = roundRetailPrice(price);
@@ -72,36 +85,34 @@ async function importFeed(feedUrl, section) {
   return upserted;
 }
 
-// Reads FEED_1_URL/FEED_1_SECTION through FEED_5_URL/FEED_5_SECTION from
-// the environment and imports every one that's configured. Add or remove
-// feeds just by editing these env vars on Render — no code changes needed.
-function loadFeedConfig() {
-  const feeds = [];
+// Reads FEED_1_URL through FEED_5_URL from the environment — just URLs now,
+// no section labels needed, since the section is worked out automatically
+// from each product's place in the feed's own category tree.
+function loadFeedUrls() {
+  const urls = [];
   for (let i = 1; i <= 5; i++) {
     const url = process.env[`FEED_${i}_URL`];
-    const section = process.env[`FEED_${i}_SECTION`];
-    if (url) feeds.push({ url, section: section || `Розділ ${i}` });
+    if (url) urls.push(url);
   }
-  return feeds;
+  return urls;
 }
 
 async function syncAllFeeds() {
-  const feeds = loadFeedConfig();
+  const urls = loadFeedUrls();
 
-  if (feeds.length === 0) {
+  if (urls.length === 0) {
     console.warn('[feed sync] No FEED_1_URL..FEED_5_URL configured — nothing to import.');
     return;
   }
 
-  for (const { url, section } of feeds) {
+  for (const url of urls) {
     try {
-      const count = await importFeed(url, section);
-      console.log(`[feed sync] [${section}] ${url} -> ${count} products upserted`);
+      const count = await importFeed(url);
+      console.log(`[feed sync] ${url} -> ${count} products upserted`);
     } catch (err) {
-      // A single feed failing should never crash the whole sync job or the server.
       console.error(`[feed sync] failed for ${url}:`, err.message);
     }
   }
 }
 
-module.exports = { importFeed, syncAllFeeds, loadFeedConfig };
+module.exports = { importFeed, syncAllFeeds, loadFeedUrls };
