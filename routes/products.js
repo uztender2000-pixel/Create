@@ -98,8 +98,9 @@ router.get('/meta/stats', async (req, res) => {
   }
 });
 
-// GET /api/products/meta/sections — top-level sections, alphabetical, with
-// a product count each. Powers the sidebar's top level.
+// GET /api/products/meta/sections — top-level sections, with the
+// bestsellers section pinned first and the rest alphabetical. Powers the
+// sidebar's top level.
 router.get('/meta/sections', async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -107,7 +108,7 @@ router.get('/meta/sections', async (req, res) => {
        FROM products
        WHERE available = true AND section IS NOT NULL
        GROUP BY section
-       ORDER BY section ASC`
+       ORDER BY (section = 'Товари-бестселери🔥') DESC, section ASC`
     );
     res.json(rows);
   } catch (err) {
