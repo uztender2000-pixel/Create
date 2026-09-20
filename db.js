@@ -58,6 +58,7 @@ async function initSchema() {
     );
 
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INTEGER;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS supplier_submitted BOOLEAN DEFAULT false;
 
     -- Safe on a table that already existed before this update: adds the two
     -- new columns without touching any existing data.
