@@ -17,6 +17,9 @@ app.use(express.json());
 
 // Simple health check — this is also the endpoint UptimeRobot should ping
 // every 5 minutes to keep the Render free-tier instance awake.
+// UptimeRobot's monitor is pointed at the root URL, not /health — give it
+// a 200 here too, so pings against either path keep the service awake.
+app.get('/', (req, res) => res.json({ ok: true, service: 'OllShop backend' }));
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 app.use('/api/products', productsRouter);
