@@ -59,6 +59,9 @@ async function initSchema() {
 
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INTEGER;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS supplier_submitted BOOLEAN DEFAULT false;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_method TEXT DEFAULT 'branch'; -- 'branch' or 'courier'
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS np_city TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_address TEXT;
 
     -- Safe on a table that already existed before this update: adds the two
     -- new columns without touching any existing data.
