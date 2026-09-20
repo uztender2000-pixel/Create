@@ -2,6 +2,24 @@ const axios = require('axios');
 const { parseStringPromise } = require('xml2js');
 const { pool } = require('../db');
 
+// Some suppliers put raw HTML in the description field (<p>, <br>, etc.).
+// Strip it down to plain text, turning block-level breaks into newlines so
+// paragraphs don't run together.
+function cleanDescription(html) {
+  if (!html) return '';
+  return html
+    .replace(/<\/(p|div|li|h[1-6])>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // dropshipping.ua feeds include a <categories> block that's a full tree:
 // <category id="841">Зоотовари</category>
 // <category id="3412" parentId="841">Одяг для домашніх тварин</category>
@@ -19,6 +37,13 @@ function buildCategoryTree(parsed) {
   return tree;
 }
 
+// Some suppliers give their root category a lazy placeholder name instead
+// of something meaningful ("корневая" = "root" in Russian, left over from
+// the supplier's own default setup). Override known placeholders here.
+const SECTION_NAME_OVERRIDES = {
+  'корневая': 'Товари-бестселери🔥',
+};
+
 // Walks up parentId links from a leaf category to find the top-level
 // section (the ancestor with no parentId) — e.g. "3417" (Комбінезони) ->
 // "3412" (Одяг) -> "841" (Зоотовари). Returns that root's name.
@@ -27,7 +52,10 @@ function buildCategoryTree(parsed) {
 function findSectionName(categoryId, tree, depth = 0) {
   const node = tree[categoryId];
   if (!node || depth > 10) return null; // depth guard against malformed/circular data
-  if (!node.parentId) return node.name; // this IS the root — it's the section
+  if (!node.parentId) {
+    const name = node.name;
+    return SECTION_NAME_OVERRIDES[name.trim().toLowerCase()] || name;
+  }
   return findSectionName(node.parentId, tree, depth + 1);
 }
 
@@ -46,7 +74,7 @@ async function importFeed(feedUrl) {
     const available = offer.$.available === 'true';
     const price = parseFloat(offer.price?.[0] || '0');
     const name = offer.name?.[0] || '';
-    const description = offer.description?.[0] || '';
+    const description = cleanDescription(offer.description?.[0] || '');
     const categoryId = offer.categoryId?.[0] || null;
     const categoryName = categoryId ? (tree[categoryId]?.name || null) : null;
     const section = categoryId ? findSectionName(categoryId, tree) : null;
