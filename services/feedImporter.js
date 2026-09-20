@@ -2,14 +2,6 @@ const axios = require('axios');
 const { parseStringPromise } = require('xml2js');
 const { pool } = require('../db');
 
-// Applied only when a product is first inserted — never overwrites a price
-// you set manually (e.g. via the /retail-price endpoint for your finalists).
-const DEFAULT_MARKUP = 1.2;
-
-function roundRetailPrice(cost) {
-  return Math.ceil((cost * DEFAULT_MARKUP) / 10) * 10;
-}
-
 // dropshipping.ua feeds include a <categories> block that's a full tree:
 // <category id="841">Зоотовари</category>
 // <category id="3412" parentId="841">Одяг для домашніх тварин</category>
@@ -46,13 +38,8 @@ async function importFeed(feedUrl) {
   const parsed = await parseStringPromise(xml, { explicitArray: true, trim: true });
 
   const tree = buildCategoryTree(parsed);
-  const treeSize = Object.keys(tree).length;
-  const sampleEntry = Object.entries(tree)[0];
-  console.log(`[feed sync] [DEBUG] ${feedUrl} — category tree has ${treeSize} entries. Sample:`, sampleEntry);
-
   const offers = parsed?.yml_catalog?.shop?.[0]?.offers?.[0]?.offer || [];
   let upserted = 0;
-  let loggedFirstOffer = false;
 
   for (const offer of offers) {
     const id = offer.$.id;
@@ -63,23 +50,17 @@ async function importFeed(feedUrl) {
     const categoryId = offer.categoryId?.[0] || null;
     const categoryName = categoryId ? (tree[categoryId]?.name || null) : null;
     const section = categoryId ? findSectionName(categoryId, tree) : null;
-
-    if (!loggedFirstOffer) {
-      console.log(`[feed sync] [DEBUG] first offer categoryId="${categoryId}" (type: ${typeof categoryId}) -> categoryName="${categoryName}", section="${section}"`);
-      loggedFirstOffer = true;
-    }
     const vendor = offer.vendor?.[0] || null;
     const picture = Array.isArray(offer.picture) ? offer.picture[0] : null;
-    const defaultRetailPrice = roundRetailPrice(price);
 
     await pool.query(
       `INSERT INTO products (id, name, description, price, retail_price, category_id, category_name, section, picture_url, vendor, available, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+       VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, now())
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
          price = EXCLUDED.price,
-         retail_price = COALESCE(products.retail_price, EXCLUDED.retail_price),
+         retail_price = EXCLUDED.price,
          category_id = EXCLUDED.category_id,
          category_name = EXCLUDED.category_name,
          section = EXCLUDED.section,
@@ -87,7 +68,7 @@ async function importFeed(feedUrl) {
          vendor = EXCLUDED.vendor,
          available = EXCLUDED.available,
          updated_at = now()`,
-      [id, name, description, price, defaultRetailPrice, categoryId, categoryName, section, picture, vendor, available]
+      [id, name, description, price, categoryId, categoryName, section, picture, vendor, available]
     );
     upserted++;
   }
