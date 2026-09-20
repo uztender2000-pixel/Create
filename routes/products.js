@@ -18,11 +18,12 @@ const SORT_OPTIONS = {
 // ?featured=true       -> just your test finalists
 // ?section=...          -> filter by top-level section (e.g. "Зоотовари")
 // ?category_id=...      -> filter by specific category within a section
+// ?q=...                 -> search by name or article/vendor_code
 // ?sort=price_asc|price_desc|name_asc|name_desc|popular|newest (default newest)
 // ?page=1&limit=24      -> pagination (defaults: page 1, 24 per page, max 100 per page)
 router.get('/', async (req, res) => {
   try {
-    const { featured, section, category_id } = req.query;
+    const { featured, section, category_id, q } = req.query;
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
     const offset = (page - 1) * limit;
@@ -42,6 +43,10 @@ router.get('/', async (req, res) => {
     if (category_id) {
       params.push(category_id);
       conditions.push(`category_id = $${params.length}`);
+    }
+    if (q && q.trim()) {
+      params.push(`%${q.trim()}%`);
+      conditions.push(`(name ILIKE $${params.length} OR vendor_code ILIKE $${params.length})`);
     }
     const where = conditions.join(' AND ');
 
