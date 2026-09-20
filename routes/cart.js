@@ -91,12 +91,15 @@ async function notifyTelegram(orderIds, items, customer) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
   const itemLines = items.map((i) => `• ${i.name} x${i.quantity}`).join('\n');
+  const deliveryLine = customer.delivery_method === 'courier'
+    ? `Кур'єром: ${customer.courier_address || '-'}`
+    : `Відділення НП: ${customer.np_branch || '-'}`;
   const text =
     `🛒 Нове замовлення з кошика (#${orderIds.join(', #')})\n` +
     `Товари:\n${itemLines}\n` +
     `Клієнт: ${customer.customer_name}, ${customer.customer_phone}\n` +
     `Місто: ${customer.customer_city || '-'}\n` +
-    `Відділення НП: ${customer.np_branch || '-'}\n` +
+    `${deliveryLine}\n` +
     `Коментар: ${customer.comment || '-'}`;
 
   try {
@@ -114,7 +117,7 @@ async function notifyTelegram(orderIds, items, customer) {
 router.post('/checkout', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { customer_name, customer_phone, customer_city, np_branch, comment } = req.body;
+    const { customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment } = req.body;
     if (!customer_name || !customer_phone) {
       return res.status(400).json({ error: "Ім'я та телефон обов'язкові" });
     }
@@ -133,16 +136,16 @@ router.post('/checkout', async (req, res) => {
     const orderIds = [];
     for (const item of cartRows) {
       const { rows } = await client.query(
-        `INSERT INTO orders (product_id, customer_name, customer_phone, customer_city, np_branch, comment, user_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [item.product_id, customer_name, customer_phone, customer_city, np_branch, comment, req.user.id]
+        `INSERT INTO orders (product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment, user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        [item.product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method || 'branch', courier_address, comment, req.user.id]
       );
       orderIds.push(rows[0].id);
     }
     await client.query('DELETE FROM cart_items WHERE user_id = $1', [req.user.id]);
     await client.query('COMMIT');
 
-    await notifyTelegram(orderIds, cartRows, { customer_name, customer_phone, customer_city, np_branch, comment });
+    await notifyTelegram(orderIds, cartRows, { customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment });
 
     // Attempt automatic submission to the supplier for the whole cart at
     // once. Does nothing until SUPPLIER_API_URL / SUPPLIER_API_KEY are

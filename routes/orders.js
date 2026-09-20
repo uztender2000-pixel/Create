@@ -12,12 +12,15 @@ async function notifyTelegram(order, productName) {
   const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID } = process.env;
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
+  const deliveryLine = order.delivery_method === 'courier'
+    ? `Кур'єром: ${order.courier_address || '-'}`
+    : `Відділення НП: ${order.np_branch || '-'}`;
   const text =
     `🛒 Нове замовлення #${order.id}\n` +
     `Товар: ${productName}\n` +
     `Клієнт: ${order.customer_name}, ${order.customer_phone}\n` +
     `Місто: ${order.customer_city || '-'}\n` +
-    `Відділення НП: ${order.np_branch || '-'}\n` +
+    `${deliveryLine}\n` +
     `Коментар: ${order.comment || '-'}`;
 
   try {
@@ -33,7 +36,7 @@ async function notifyTelegram(order, productName) {
 // POST /api/orders — the order form on the landing page submits here.
 router.post('/', async (req, res) => {
   try {
-    const { product_id, customer_name, customer_phone, customer_city, np_branch, comment } = req.body;
+    const { product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment } = req.body;
 
     if (!product_id || !customer_name || !customer_phone) {
       return res.status(400).json({ error: 'product_id, customer_name and customer_phone are required' });
@@ -45,9 +48,9 @@ router.post('/', async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO orders (product_id, customer_name, customer_phone, customer_city, np_branch, comment)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [product_id, customer_name, customer_phone, customer_city, np_branch, comment]
+      `INSERT INTO orders (product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method || 'branch', courier_address, comment]
     );
 
     const order = rows[0];

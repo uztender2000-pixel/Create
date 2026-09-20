@@ -81,6 +81,18 @@ router.get('/', async (req, res) => {
   }
 });
 
+// GET /api/products/meta/stats — total product count, for the homepage's
+// "40 000+ товарів"-style counter so it never goes stale.
+router.get('/meta/stats', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT COUNT(*)::int AS total FROM products WHERE available = true');
+    res.json({ totalProducts: rows[0].total });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load stats' });
+  }
+});
+
 // GET /api/products/meta/sections — top-level sections, alphabetical, with
 // a product count each. Powers the sidebar's top level.
 router.get('/meta/sections', async (req, res) => {
