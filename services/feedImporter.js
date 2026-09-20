@@ -51,11 +51,27 @@ async function importFeed(feedUrl) {
     const categoryName = categoryId ? (tree[categoryId]?.name || null) : null;
     const section = categoryId ? findSectionName(categoryId, tree) : null;
     const vendor = offer.vendor?.[0] || null;
-    const picture = Array.isArray(offer.picture) ? offer.picture[0] : null;
+    const vendorCode = offer.vendorCode?.[0] || null;
+
+    // Every <picture> the feed gives this offer, in order — not just the first.
+    const pictures = Array.isArray(offer.picture) ? offer.picture : (offer.picture ? [offer.picture] : []);
+    const picture = pictures[0] || null;
+
+    // <param name="Об'єм" unit="мл">500</param> — xml2js gives each as
+    // { _: '500', $: { name: "Об'єм", unit: 'мл' } }. Build a flat spec
+    // object for the detail page's characteristics table.
+    const rawParams = Array.isArray(offer.param) ? offer.param : (offer.param ? [offer.param] : []);
+    const params = {};
+    for (const p of rawParams) {
+      const paramName = p?.$?.name;
+      const unit = p?.$?.unit;
+      const value = typeof p === 'object' ? (p._ || '').trim() : String(p).trim();
+      if (paramName) params[paramName] = unit ? `${value} ${unit}` : value;
+    }
 
     await pool.query(
-      `INSERT INTO products (id, name, description, price, retail_price, category_id, category_name, section, picture_url, vendor, available, updated_at)
-       VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, now())
+      `INSERT INTO products (id, name, description, price, retail_price, category_id, category_name, section, picture_url, pictures, vendor_code, params, vendor, available, updated_at)
+       VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
@@ -65,10 +81,13 @@ async function importFeed(feedUrl) {
          category_name = EXCLUDED.category_name,
          section = EXCLUDED.section,
          picture_url = EXCLUDED.picture_url,
+         pictures = EXCLUDED.pictures,
+         vendor_code = EXCLUDED.vendor_code,
+         params = EXCLUDED.params,
          vendor = EXCLUDED.vendor,
          available = EXCLUDED.available,
          updated_at = now()`,
-      [id, name, description, price, categoryId, categoryName, section, picture, vendor, available]
+      [id, name, description, price, categoryId, categoryName, section, picture, pictures, vendorCode, JSON.stringify(params), vendor, available]
     );
     upserted++;
   }
