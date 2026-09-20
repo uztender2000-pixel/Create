@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const { pool } = require('../db');
+const { submitOrderToSupplier } = require('../services/supplierClient');
 
 const router = express.Router();
 
@@ -51,6 +52,22 @@ router.post('/', async (req, res) => {
 
     const order = rows[0];
     await notifyTelegram(order, productResult.rows[0].name);
+
+    // Attempt automatic submission to the supplier. Does nothing until
+    // SUPPLIER_API_URL / SUPPLIER_API_KEY are configured — see
+    // services/supplierClient.js for details.
+    const supplierResult = await submitOrderToSupplier({
+      customerName: order.customer_name,
+      customerPhone: order.customer_phone,
+      city: order.customer_city,
+      npBranch: order.np_branch,
+      comment: order.comment,
+      items: [{ productId: order.product_id, quantity: 1 }],
+    });
+    if (supplierResult.submitted) {
+      await pool.query('UPDATE orders SET supplier_submitted = true WHERE id = $1', [order.id]);
+      order.supplier_submitted = true;
+    }
 
     res.status(201).json(order);
   } catch (err) {

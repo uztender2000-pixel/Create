@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { submitOrderToSupplier } = require('../services/supplierClient');
 
 const router = express.Router();
 router.use(requireAuth); // every cart route requires login
@@ -143,7 +144,22 @@ router.post('/checkout', async (req, res) => {
 
     await notifyTelegram(orderIds, cartRows, { customer_name, customer_phone, customer_city, np_branch, comment });
 
-    res.status(201).json({ ok: true, orderIds });
+    // Attempt automatic submission to the supplier for the whole cart at
+    // once. Does nothing until SUPPLIER_API_URL / SUPPLIER_API_KEY are
+    // configured — see services/supplierClient.js.
+    const supplierResult = await submitOrderToSupplier({
+      customerName: customer_name,
+      customerPhone: customer_phone,
+      city: customer_city,
+      npBranch: np_branch,
+      comment,
+      items: cartRows.map((item) => ({ productId: item.product_id, quantity: item.quantity })),
+    });
+    if (supplierResult.submitted) {
+      await pool.query('UPDATE orders SET supplier_submitted = true WHERE id = ANY($1)', [orderIds]);
+    }
+
+    res.status(201).json({ ok: true, orderIds, supplierSubmitted: supplierResult.submitted });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
