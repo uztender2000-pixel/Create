@@ -28,6 +28,11 @@ app.use('/api/delivery', deliveryRouter);
 const PORT = process.env.PORT || 3000;
 
 async function start() {
+  if (!process.env.JWT_SECRET) {
+    console.error('FATAL: JWT_SECRET is not set. Registration and login will fail until you add it in Render → Environment.');
+    process.exit(1);
+  }
+
   await initSchema();
   console.log('Database schema ready.');
 
