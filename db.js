@@ -52,6 +52,26 @@ async function initSchema() {
       created_at    TIMESTAMPTZ DEFAULT now()
     );
 
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN DEFAULT false;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_code TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_code_expires TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_code TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email_code_expires TIMESTAMPTZ;
+    -- Saved delivery info, so checkout can autofill it for repeat orders.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_delivery_method TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city_ref TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_branch TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_courier_address TEXT;
+
+    CREATE TABLE IF NOT EXISTS support_messages (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message     TEXT NOT NULL,
+      created_at  TIMESTAMPTZ DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS cart_items (
       user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       product_id  TEXT NOT NULL REFERENCES products(id),
