@@ -19,7 +19,10 @@ async function initSchema() {
       category_id   TEXT,
       category_name TEXT,                    -- human-readable category, parsed from the feed
       section       TEXT,                    -- top-level section, e.g. "Зоотовари", "Дім", "Парфумерія"
-      picture_url   TEXT,
+      picture_url   TEXT,                     -- first image, used for grid cards
+      pictures      TEXT[],                   -- every image from the feed, for the detail page gallery
+      vendor_code   TEXT,                      -- supplier's SKU/article number
+      params        JSONB,                     -- spec table: {"Об'єм": "500 мл", "Вага": "10 кг", ...}
       vendor        TEXT,
       available     BOOLEAN DEFAULT true,
       featured      BOOLEAN DEFAULT false,   -- mark your 3 finalists true so they show up first
@@ -67,6 +70,9 @@ async function initSchema() {
     -- new columns without touching any existing data.
     ALTER TABLE products ADD COLUMN IF NOT EXISTS category_name TEXT;
     ALTER TABLE products ADD COLUMN IF NOT EXISTS section TEXT;
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS pictures TEXT[];
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS vendor_code TEXT;
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS params JSONB;
   `);
 }
 
