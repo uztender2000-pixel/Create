@@ -41,14 +41,20 @@ router.get('/cities', async (req, res) => {
   }
 });
 
-// GET /api/delivery/warehouses?cityRef=... — branches for the chosen city.
+// GET /api/delivery/warehouses?cityRef=...&type=branch|postomat — branches
+// or parcel lockers for the chosen city. type defaults to "branch".
 router.get('/warehouses', async (req, res) => {
   try {
     const cityRef = req.query.cityRef;
+    const type = req.query.type === 'postomat' ? 'postomat' : 'branch';
     if (!cityRef) return res.status(400).json({ error: 'cityRef is required' });
 
     const data = await novaPoshtaRequest('AddressGeneral', 'getWarehouses', { CityRef: cityRef, Limit: 500 });
-    res.json(data.map((w) => ({ ref: w.Ref, name: w.Description })));
+    const filtered = data.filter((w) => {
+      const isPostomat = w.CategoryOfWarehouse === 'Postomat' || /поштомат/i.test(w.Description || '');
+      return type === 'postomat' ? isPostomat : !isPostomat;
+    });
+    res.json(filtered.map((w) => ({ ref: w.Ref, name: w.Description })));
   } catch (err) {
     if (err.notConfigured) {
       return res.status(503).json({ error: 'Доставку Новою поштою ще не налаштовано на сайті' });

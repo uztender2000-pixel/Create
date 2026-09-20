@@ -3,6 +3,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { sendSms } = require('../services/smsClient');
+const { sendEmail } = require('../services/emailClient');
 
 const router = express.Router();
 
@@ -10,12 +12,35 @@ function signToken(user) {
   return jwt.sign({ userId: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '30d' });
 }
 
-// POST /api/auth/register — { name, email, phone, password }
+function generateCode() {
+  return String(Math.floor(100000 + Math.random() * 900000)); // 6-digit code
+}
+
+function codeExpiry() {
+  return new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+}
+
+async function issuePhoneCode(userId, phone) {
+  const code = generateCode();
+  await pool.query('UPDATE users SET phone_code = $1, phone_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
+  await sendSms(phone, `OllShop: ваш код підтвердження телефону — ${code}`);
+}
+
+async function issueEmailCode(userId, email) {
+  const code = generateCode();
+  await pool.query('UPDATE users SET email_code = $1, email_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
+  await sendEmail(email, 'Підтвердження email — OllShop', `Ваш код підтвердження email: ${code}\n\nКод дійсний 15 хвилин.`);
+}
+
+// POST /api/auth/register — { name, email, phone, password }. Phone is
+// required. Sends verification codes for both phone and email right after
+// signup — verifying them is optional and happens later from the account
+// page, it does not block registration or login.
 router.post('/register', async (req, res) => {
   try {
     const { name, email, phone, password } = req.body;
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: "Ім'я, email і пароль обов'язкові" });
+    if (!name || !email || !password || !phone) {
+      return res.status(400).json({ error: "Ім'я, email, телефон і пароль обов'язкові" });
     }
     if (password.length < 6) {
       return res.status(400).json({ error: 'Пароль має бути щонайменше 6 символів' });
@@ -30,10 +55,16 @@ router.post('/register', async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO users (name, email, phone, password_hash) VALUES ($1, $2, $3, $4)
        RETURNING id, name, email, phone`,
-      [name, email.toLowerCase(), phone || null, passwordHash]
+      [name, email.toLowerCase(), phone, passwordHash]
     );
 
     const user = rows[0];
+
+    // Fire-and-forget: don't let a slow/failed SMS or email delay or break
+    // registration itself.
+    issuePhoneCode(user.id, user.phone).catch((err) => console.error('[register] phone code failed:', err.message));
+    issueEmailCode(user.id, user.email).catch((err) => console.error('[register] email code failed:', err.message));
+
     res.status(201).json({ user, token: signToken(user) });
   } catch (err) {
     console.error(err);
@@ -71,12 +102,87 @@ router.post('/login', async (req, res) => {
 // GET /api/auth/me — returns the logged-in user (for restoring session on page load)
 router.get('/me', requireAuth, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, name, email, phone FROM users WHERE id = $1', [req.user.id]);
+    const { rows } = await pool.query(
+      `SELECT id, name, email, phone, phone_verified, email_verified,
+              saved_delivery_method, saved_city, saved_city_ref, saved_branch, saved_courier_address
+       FROM users WHERE id = $1`,
+      [req.user.id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ user: rows[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+// POST /api/auth/send-phone-code — (re)send the SMS verification code
+router.post('/send-phone-code', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT phone, phone_verified FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    if (rows[0].phone_verified) return res.json({ ok: true, alreadyVerified: true });
+
+    await issuePhoneCode(req.user.id, rows[0].phone);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося надіслати код' });
+  }
+});
+
+// POST /api/auth/verify-phone — { code }
+router.post('/verify-phone', requireAuth, async (req, res) => {
+  try {
+    const { code } = req.body;
+    const { rows } = await pool.query('SELECT phone_code, phone_code_expires FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+
+    const record = rows[0];
+    if (!record.phone_code || record.phone_code !== code || new Date(record.phone_code_expires) < new Date()) {
+      return res.status(400).json({ error: 'Невірний або прострочений код' });
+    }
+
+    await pool.query('UPDATE users SET phone_verified = true, phone_code = NULL WHERE id = $1', [req.user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося підтвердити телефон' });
+  }
+});
+
+// POST /api/auth/send-email-code — (re)send the email verification code
+router.post('/send-email-code', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT email, email_verified FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    if (rows[0].email_verified) return res.json({ ok: true, alreadyVerified: true });
+
+    await issueEmailCode(req.user.id, rows[0].email);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося надіслати код' });
+  }
+});
+
+// POST /api/auth/verify-email — { code }
+router.post('/verify-email', requireAuth, async (req, res) => {
+  try {
+    const { code } = req.body;
+    const { rows } = await pool.query('SELECT email_code, email_code_expires FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+
+    const record = rows[0];
+    if (!record.email_code || record.email_code !== code || new Date(record.email_code_expires) < new Date()) {
+      return res.status(400).json({ error: 'Невірний або прострочений код' });
+    }
+
+    await pool.query('UPDATE users SET email_verified = true, email_code = NULL WHERE id = $1', [req.user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося підтвердити email' });
   }
 });
 
