@@ -5,7 +5,7 @@ const cron = require('node-cron');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
-const { pool, initSchema } = require('./db');
+const { pool, initSchema, seedInitialAdmin } = require('./db');
 const { syncAllFeeds } = require('./services/feedImporter');
 const productsRouter = require('./routes/products');
 const ordersRouter = require('./routes/orders');
@@ -14,6 +14,10 @@ const cartRouter = require('./routes/cart');
 const deliveryRouter = require('./routes/delivery');
 const accountRouter = require('./routes/account');
 const configRouter = require('./routes/config');
+const adminAuthRouter = require('./routes/adminAuth');
+const adminUsersRouter = require('./routes/adminUsers');
+const adminOrdersRouter = require('./routes/adminOrders');
+const adminStatsRouter = require('./routes/adminStats');
 
 const app = express();
 
@@ -55,6 +59,10 @@ app.use('/api/cart', cartRouter);
 app.use('/api/delivery', deliveryRouter);
 app.use('/api/account', accountRouter);
 app.use('/api/config', configRouter);
+app.use('/api/admin/auth', adminAuthRouter);
+app.use('/api/admin/users', adminUsersRouter);
+app.use('/api/admin/orders', adminOrdersRouter);
+app.use('/api/admin/stats', adminStatsRouter);
 
 const PORT = process.env.PORT || 3000;
 
@@ -63,9 +71,15 @@ async function start() {
     console.error('FATAL: JWT_SECRET is not set. Registration and login will fail until you add it in Render → Environment.');
     process.exit(1);
   }
+  if (!process.env.ADMIN_JWT_SECRET) {
+    console.error('FATAL: ADMIN_JWT_SECRET is not set. Set it to a different long random string than JWT_SECRET.');
+    process.exit(1);
+  }
 
   await initSchema();
   console.log('Database schema ready.');
+
+  await seedInitialAdmin();
 
   // Pull the feeds once immediately on boot, so the catalog isn't empty
   // while waiting for the first scheduled run.

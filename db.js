@@ -72,6 +72,24 @@ async function initSchema() {
       created_at  TIMESTAMPTZ DEFAULT now()
     );
 
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1;
+
+    -- Admin/owner accounts for the separate owner dashboard (admin.html).
+    -- role = 'admin' always has full access to every page, regardless of
+    -- the permissions column — that's the owner's role. Any other role
+    -- (e.g. 'staff') is limited to whatever permissions lists as true.
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id                    SERIAL PRIMARY KEY,
+      name                  TEXT NOT NULL,
+      email                 TEXT UNIQUE NOT NULL,
+      password_hash         TEXT NOT NULL,
+      role                  TEXT NOT NULL DEFAULT 'staff', -- 'admin' or 'staff'
+      permissions           JSONB NOT NULL DEFAULT '{"orders": true, "stats": false, "settings": false}',
+      must_change_password  BOOLEAN NOT NULL DEFAULT true,
+      active                BOOLEAN NOT NULL DEFAULT true,
+      created_at            TIMESTAMPTZ DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS cart_items (
       user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       product_id  TEXT NOT NULL REFERENCES products(id),
@@ -96,4 +114,30 @@ async function initSchema() {
   `);
 }
 
-module.exports = { pool, initSchema };
+// Creates the very first owner/admin account, but only if admin_users is
+// completely empty — safe to call on every boot. Reads the initial email
+// and password from env vars you set once in Render; the owner is forced
+// to change that password on first login (see must_change_password).
+async function seedInitialAdmin() {
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS count FROM admin_users');
+  if (rows[0].count > 0) return; // already seeded, never overwrite
+
+  const email = process.env.ADMIN_EMAIL;
+  const password = process.env.ADMIN_INITIAL_PASSWORD;
+  if (!email || !password) {
+    console.warn('[admin] No admin_users yet, and ADMIN_EMAIL/ADMIN_INITIAL_PASSWORD are not set — ' +
+      'the owner dashboard has no way to log in until you set them in Render → Environment and redeploy.');
+    return;
+  }
+
+  const bcrypt = require('bcryptjs');
+  const passwordHash = await bcrypt.hash(password, 10);
+  await pool.query(
+    `INSERT INTO admin_users (name, email, password_hash, role, permissions, must_change_password)
+     VALUES ('Власник', $1, $2, 'admin', '{"orders":true,"stats":true,"settings":true}', true)`,
+    [email.toLowerCase(), passwordHash]
+  );
+  console.log(`[admin] Seeded initial owner account for ${email}. Change the password on first login.`);
+}
+
+module.exports = { pool, initSchema, seedInitialAdmin };
