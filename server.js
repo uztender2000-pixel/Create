@@ -20,6 +20,7 @@ const adminUsersRouter = require('./routes/adminUsers');
 const adminOrdersRouter = require('./routes/adminOrders');
 const adminStatsRouter = require('./routes/adminStats');
 const adminSuppliersRouter = require('./routes/adminSuppliers');
+const adminSqlRouter = require('./routes/adminSql');
 
 const app = express();
 
@@ -51,6 +52,7 @@ app.use('/api/admin/users', adminUsersRouter);
 app.use('/api/admin/orders', adminOrdersRouter);
 app.use('/api/admin/stats', adminStatsRouter);
 app.use('/api/admin/suppliers', adminSuppliersRouter);
+app.use('/api/admin/sql', adminSqlRouter);
 
 const PORT = process.env.PORT || 3000;
 

@@ -257,6 +257,17 @@ async function initSchema() {
     UPDATE orders o SET supplier_id = p.supplier_id
       FROM products p WHERE p.id = o.product_id AND o.supplier_id IS NULL;
 
+    -- Journal of SQL run from the admin panel with write access enabled.
+    CREATE TABLE IF NOT EXISTS admin_sql_log (
+      id         SERIAL PRIMARY KEY,
+      admin_id   INTEGER,
+      admin_email TEXT,
+      query      TEXT NOT NULL,
+      outcome    TEXT NOT NULL,          -- 'ok' | 'error' | 'bad_password'
+      detail     TEXT,                   -- row counts or the error message
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+
     CREATE INDEX IF NOT EXISTS idx_products_supplier ON products (supplier_id);
     CREATE INDEX IF NOT EXISTS idx_products_available ON products (available);
     CREATE INDEX IF NOT EXISTS idx_products_section ON products (section);
