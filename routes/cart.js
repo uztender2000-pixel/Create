@@ -1,25 +1,31 @@
 const express = require('express');
-const axios = require('axios');
+const crypto = require('crypto');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
-const { submitOrderToSupplier } = require('../services/supplierClient');
+const { dispatchGroup } = require('../services/orderDispatcher');
 
 const router = express.Router();
 router.use(requireAuth); // every cart route requires login
 
-// GET /api/cart — items with product details (name, price, picture)
+// GET /api/cart — items with product details. Now also tells the customer
+// which supplier each item ships from, because a multi-supplier basket
+// arrives in more than one parcel and that shouldn't be a surprise.
 router.get('/', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT c.product_id, c.quantity, p.name, p.retail_price, p.picture_url, p.vendor
-       FROM cart_items c
-       JOIN products p ON p.id = c.product_id
-       WHERE c.user_id = $1
-       ORDER BY c.added_at DESC`,
+      `SELECT c.product_id, c.quantity,
+              p.name, p.retail_price, p.picture_url, p.vendor, p.available,
+              p.supplier_id, s.name AS supplier_name
+         FROM cart_items c
+         JOIN products p ON p.id = c.product_id
+         LEFT JOIN suppliers s ON s.id = p.supplier_id
+        WHERE c.user_id = $1
+        ORDER BY c.added_at DESC`,
       [req.user.id]
     );
-    const total = rows.reduce((sum, item) => sum + (item.retail_price || 0) * item.quantity, 0);
-    res.json({ items: rows, total });
+    const total = rows.reduce((sum, item) => sum + Number(item.retail_price || 0) * item.quantity, 0);
+    const parcels = new Set(rows.map((r) => r.supplier_id)).size;
+    res.json({ items: rows, total, parcels });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load cart' });
@@ -85,37 +91,13 @@ router.delete('/:productId', async (req, res) => {
   }
 });
 
-// Sends you a Telegram message for a cart checkout (multiple items at once).
-async function notifyTelegram(orderIds, items, customer) {
-  const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID } = process.env;
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-
-  const itemLines = items.map((i) => `• ${i.name} x${i.quantity}`).join('\n');
-  const deliveryLine = customer.delivery_method === 'courier'
-    ? `Кур'єром: ${customer.courier_address || '-'}`
-    : `Відділення НП: ${customer.np_branch || '-'}`;
-  const text =
-    `🛒 Нове замовлення з кошика (#${orderIds.join(', #')})\n` +
-    `Товари:\n${itemLines}\n` +
-    `Клієнт: ${customer.customer_name}, ${customer.customer_phone}\n` +
-    `Місто: ${customer.customer_city || '-'}\n` +
-    `${deliveryLine}\n` +
-    `Коментар: ${customer.comment || '-'}`;
-
-  try {
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: TELEGRAM_CHAT_ID,
-      text,
-    });
-  } catch (err) {
-    console.error('[telegram] cart notify failed:', err.message);
-  }
-}
-
-// POST /api/cart/checkout — turns every item in the cart into an order
-// (one order row per product, same customer info), then empties the cart.
+// POST /api/cart/checkout — turns the cart into one order group: one row
+// per product, all sharing a group_id, each tagged with its supplier.
+// The dispatcher then splits that group by supplier and submits each
+// share separately.
 router.post('/checkout', async (req, res) => {
   const client = await pool.connect();
+  let groupId;
   try {
     const { customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment } = req.body;
     if (!customer_name || !customer_phone) {
@@ -123,48 +105,57 @@ router.post('/checkout', async (req, res) => {
     }
 
     const { rows: cartRows } = await client.query(
-      `SELECT c.product_id, c.quantity, p.name
-       FROM cart_items c JOIN products p ON p.id = c.product_id
-       WHERE c.user_id = $1`,
+      `SELECT c.product_id, c.quantity, p.name, p.supplier_id, p.price, p.retail_price, p.available
+         FROM cart_items c JOIN products p ON p.id = c.product_id
+        WHERE c.user_id = $1`,
       [req.user.id]
     );
     if (!cartRows.length) {
       return res.status(400).json({ error: 'Кошик порожній' });
     }
 
+    // A product can go out of stock between adding it and checking out —
+    // with several suppliers syncing on their own schedules this happens
+    // more often than with one feed, so check at the last moment.
+    const unavailable = cartRows.filter((r) => !r.available);
+    if (unavailable.length) {
+      return res.status(409).json({
+        error: 'Деякі товари вже недоступні — приберіть їх з кошика',
+        items: unavailable.map((r) => ({ product_id: r.product_id, name: r.name })),
+      });
+    }
+
+    groupId = crypto.randomUUID();
+
     await client.query('BEGIN');
     const orderIds = [];
     for (const item of cartRows) {
       const { rows } = await client.query(
-        `INSERT INTO orders (product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment, user_id, quantity)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
-        [item.product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method || 'branch', courier_address, comment, req.user.id, item.quantity]
+        `INSERT INTO orders (
+           group_id, product_id, supplier_id, quantity,
+           customer_name, customer_phone, customer_city,
+           np_branch, delivery_method, courier_address, comment,
+           user_id, unit_price, cost_price
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         RETURNING id`,
+        [
+          groupId, item.product_id, item.supplier_id, item.quantity,
+          customer_name, customer_phone, customer_city,
+          np_branch, delivery_method || 'branch', courier_address, comment,
+          req.user.id, item.retail_price, item.price,
+        ]
       );
       orderIds.push(rows[0].id);
     }
     await client.query('DELETE FROM cart_items WHERE user_id = $1', [req.user.id]);
     await client.query('COMMIT');
 
-    await notifyTelegram(orderIds, cartRows, { customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment });
+    const dispatch = await dispatchGroup(groupId);
 
-    // Attempt automatic submission to the supplier for the whole cart at
-    // once. Does nothing until SUPPLIER_API_URL / SUPPLIER_API_KEY are
-    // configured — see services/supplierClient.js.
-    const supplierResult = await submitOrderToSupplier({
-      customerName: customer_name,
-      customerPhone: customer_phone,
-      city: customer_city,
-      npBranch: np_branch,
-      comment,
-      items: cartRows.map((item) => ({ productId: item.product_id, quantity: item.quantity })),
-    });
-    if (supplierResult.submitted) {
-      await pool.query('UPDATE orders SET supplier_submitted = true WHERE id = ANY($1)', [orderIds]);
-    }
-
-    res.status(201).json({ ok: true, orderIds, supplierSubmitted: supplierResult.submitted });
+    res.status(201).json({ ok: true, groupId, orderIds, dispatch });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     console.error(err);
     res.status(500).json({ error: 'Не вдалося оформити замовлення' });
   } finally {

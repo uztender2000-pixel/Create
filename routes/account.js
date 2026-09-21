@@ -13,12 +13,21 @@ router.use(requireAuth); // every account route requires login
 router.get('/orders', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT o.id, o.status, o.ttn, o.delivery_method, o.np_branch, o.courier_address,
-              o.customer_city, o.created_at, p.name AS product_name, p.picture_url, p.retail_price
+      // unit_price is the price the customer actually paid, frozen at
+      // checkout — p.retail_price may have changed since, and with several
+      // suppliers repricing daily it usually has. Falls back to the current
+      // price for orders placed before unit_price existed.
+      // group_id lets the account page show one checkout as one order even
+      // when it was split across suppliers into several shipments.
+      `SELECT o.id, o.group_id, o.status, o.ttn, o.quantity,
+              o.delivery_method, o.np_branch, o.courier_address,
+              o.customer_city, o.created_at,
+              p.name AS product_name, p.picture_url,
+              COALESCE(o.unit_price, p.retail_price) AS retail_price
        FROM orders o
        JOIN products p ON p.id = o.product_id
        WHERE o.user_id = $1
-       ORDER BY o.created_at DESC`,
+       ORDER BY o.created_at DESC, o.id`,
       [req.user.id]
     );
     res.json(rows);
