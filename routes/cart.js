@@ -136,9 +136,9 @@ router.post('/checkout', async (req, res) => {
     const orderIds = [];
     for (const item of cartRows) {
       const { rows } = await client.query(
-        `INSERT INTO orders (product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment, user_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-        [item.product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method || 'branch', courier_address, comment, req.user.id]
+        `INSERT INTO orders (product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method, courier_address, comment, user_id, quantity)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+        [item.product_id, customer_name, customer_phone, customer_city, np_branch, delivery_method || 'branch', courier_address, comment, req.user.id, item.quantity]
       );
       orderIds.push(rows[0].id);
     }
