@@ -58,8 +58,10 @@ router.post('/', async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO suppliers (code, name, adapter, feed_urls, api_url, api_key, api_login,
                               config, markup_percent, auto_order, active, sort_order)
-       VALUES ($1,$2,COALESCE($3,'yml_feed'),COALESCE($4,'{}'),$5,$6,$7,
-               COALESCE($8,'{}'),COALESCE($9,0),COALESCE($10,false),COALESCE($11,true),COALESCE($12,0))
+       VALUES ($1, $2, COALESCE($3::text, 'yml_feed'), COALESCE($4::text[], '{}'::text[]),
+               $5::text, $6::text, $7::text,
+               COALESCE($8::jsonb, '{}'::jsonb), COALESCE($9::numeric, 0),
+               COALESCE($10::boolean, false), COALESCE($11::boolean, true), COALESCE($12::integer, 0))
        RETURNING id`,
       [
         code.trim(), name.trim(), adapter, feed_urls, api_url, api_key, api_login,
@@ -147,6 +149,43 @@ router.post('/:id/reprice', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to reprice' });
+  }
+});
+
+// POST /api/admin/suppliers/:id/purge — delete this supplier's catalogue.
+// Products that appear in past orders can't be deleted (order history
+// must keep pointing at something), so those are only switched off.
+// The supplier itself stays, so it can be synced again later.
+router.post('/:id/purge', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { rows: sup } = await client.query('SELECT id, name FROM suppliers WHERE id = $1', [req.params.id]);
+    if (!sup.length) return res.status(404).json({ error: 'Not found' });
+
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM cart_items WHERE product_id IN (SELECT id FROM products WHERE supplier_id = $1)`,
+      [req.params.id]
+    );
+    const { rowCount: deleted } = await client.query(
+      `DELETE FROM products
+        WHERE supplier_id = $1
+          AND id NOT IN (SELECT product_id FROM orders WHERE product_id IS NOT NULL)`,
+      [req.params.id]
+    );
+    const { rowCount: kept } = await client.query(
+      `UPDATE products SET available = false WHERE supplier_id = $1`,
+      [req.params.id]
+    );
+    await client.query('COMMIT');
+
+    res.json({ ok: true, deleted, keptBecauseOfOrders: kept });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error(err);
+    res.status(500).json({ error: 'Failed to purge catalogue' });
+  } finally {
+    client.release();
   }
 });
 
