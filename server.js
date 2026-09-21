@@ -5,8 +5,9 @@ const cron = require('node-cron');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
-const { pool, initSchema, seedInitialAdmin } = require('./db');
-const { syncAllFeeds } = require('./services/feedImporter');
+const { pool, initSchema, seedInitialAdmin, seedSuppliersFromEnv } = require('./db');
+const { syncAllSuppliers } = require('./services/catalogSync');
+
 const productsRouter = require('./routes/products');
 const ordersRouter = require('./routes/orders');
 const authRouter = require('./routes/auth');
@@ -18,37 +19,23 @@ const adminAuthRouter = require('./routes/adminAuth');
 const adminUsersRouter = require('./routes/adminUsers');
 const adminOrdersRouter = require('./routes/adminOrders');
 const adminStatsRouter = require('./routes/adminStats');
+const adminSuppliersRouter = require('./routes/adminSuppliers');
 
 const app = express();
 
-// Sets a standard set of protective HTTP headers (no sniffing, no
-// clickjacking via frames, hides tech stack fingerprinting, etc.). Disabled
-// CSP here since this is a pure JSON API, not serving HTML.
 app.use(helmet({ contentSecurityPolicy: false }));
 
-// Only your own storefront origin may call this API from a browser. Set
-// FRONTEND_ORIGIN in Render to your Static Site's URL once you know it —
-// until then this falls back to allowing any origin, so nothing breaks
-// during setup.
 const allowedOrigin = process.env.FRONTEND_ORIGIN;
 app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
 
-app.use(express.json({ limit: '1mb' })); // caps request body size against abuse
+app.use(express.json({ limit: '1mb' }));
 
-// General API rate limit: 300 requests per 15 minutes per IP — generous
-// for real shoppers, restrictive against scripted abuse/scraping.
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false }));
 
-// Tighter limit specifically on auth endpoints — the ones worth protecting
-// most against brute-force password guessing or mass fake signups.
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 
-// Simple health check — this is also the endpoint UptimeRobot should ping
-// every 5 minutes to keep the Render free-tier instance awake.
-// UptimeRobot's monitor is pointed at the root URL, not /health — give it
-// a 200 here too, so pings against either path keep the service awake.
 app.get('/', (req, res) => res.json({ ok: true, service: 'OllShop backend' }));
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
@@ -63,8 +50,28 @@ app.use('/api/admin/auth', adminAuthRouter);
 app.use('/api/admin/users', adminUsersRouter);
 app.use('/api/admin/orders', adminOrdersRouter);
 app.use('/api/admin/stats', adminStatsRouter);
+app.use('/api/admin/suppliers', adminSuppliersRouter);
 
 const PORT = process.env.PORT || 3000;
+
+// Guards against two syncs running at once — a manual sync from the
+// dashboard overlapping the hourly cron would otherwise have both
+// processes deactivating each other's products mid-run.
+let syncing = false;
+async function runSync(label) {
+  if (syncing) {
+    console.warn(`[${label}] Попередня синхронізація ще триває — пропускаю цей запуск.`);
+    return;
+  }
+  syncing = true;
+  try {
+    await syncAllSuppliers();
+  } catch (err) {
+    console.error(`[${label}] sync failed:`, err.message);
+  } finally {
+    syncing = false;
+  }
+}
 
 async function start() {
   if (!process.env.JWT_SECRET) {
@@ -80,18 +87,19 @@ async function start() {
   console.log('Database schema ready.');
 
   await seedInitialAdmin();
+  await seedSuppliersFromEnv();
 
-  // Pull the feeds once immediately on boot, so the catalog isn't empty
-  // while waiting for the first scheduled run.
-  await syncAllFeeds();
-
-  // Then keep it fresh on the schedule set in .env (default: hourly).
-  cron.schedule(process.env.FEED_SYNC_CRON || '0 * * * *', () => {
-    console.log('[cron] running scheduled feed sync...');
-    syncAllFeeds();
-  });
-
+  // Start serving straight away. The first catalogue pull runs in the
+  // background: with several suppliers it can take minutes, and the API
+  // shouldn't be unreachable while it does.
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+  runSync('boot');
+
+  cron.schedule(process.env.FEED_SYNC_CRON || '0 * * * *', () => {
+    console.log('[cron] running scheduled catalogue sync...');
+    runSync('cron');
+  });
 }
 
 start().catch((err) => {
@@ -99,7 +107,6 @@ start().catch((err) => {
   process.exit(1);
 });
 
-// Graceful shutdown so Render's deploys don't leave dangling DB connections.
 process.on('SIGTERM', async () => {
   await pool.end();
   process.exit(0);
