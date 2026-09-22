@@ -268,6 +268,10 @@ async function initSchema() {
       created_at TIMESTAMPTZ DEFAULT now()
     );
 
+    -- Забираємо стару назву розділу з уже завантажених товарів.
+    UPDATE products SET section = 'Інші товари' WHERE section = 'Товари-бестселери🔥';
+    UPDATE products SET category_name = 'Інші товари' WHERE category_name = 'Товари-бестселери🔥';
+
     CREATE INDEX IF NOT EXISTS idx_products_supplier ON products (supplier_id);
     CREATE INDEX IF NOT EXISTS idx_products_available ON products (available);
     CREATE INDEX IF NOT EXISTS idx_products_section ON products (section);
