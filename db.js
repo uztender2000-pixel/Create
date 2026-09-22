@@ -268,9 +268,24 @@ async function initSchema() {
       created_at TIMESTAMPTZ DEFAULT now()
     );
 
-    -- Забираємо стару назву розділу з уже завантажених товарів.
-    UPDATE products SET section = 'Інші товари' WHERE section = 'Товари-бестселери🔥';
-    UPDATE products SET category_name = 'Інші товари' WHERE category_name = 'Товари-бестселери🔥';
+    -- Journal of things that went wrong operationally: a supplier's sync
+    -- failing, an order that couldn't be submitted, a webhook that failed
+    -- to process. This is what the admin panel's "Логи" page reads —
+    -- unlike suppliers.last_sync_message (which only ever holds the
+    -- MOST RECENT result), this keeps history, so an intermittent
+    -- problem shows up as a pattern instead of being overwritten by the
+    -- next successful run.
+    CREATE TABLE IF NOT EXISTS event_log (
+      id          SERIAL PRIMARY KEY,
+      level       TEXT NOT NULL DEFAULT 'error',   -- 'error' | 'warn'
+      source      TEXT NOT NULL,                   -- 'sync' | 'order' | 'webhook'
+      supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      message     TEXT NOT NULL,
+      detail      TEXT,                            -- extra context: stack, response body, etc.
+      created_at  TIMESTAMPTZ DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log (created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_event_log_supplier ON event_log (supplier_id);
 
     CREATE INDEX IF NOT EXISTS idx_products_supplier ON products (supplier_id);
     CREATE INDEX IF NOT EXISTS idx_products_available ON products (available);
