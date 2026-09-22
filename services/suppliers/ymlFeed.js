@@ -60,7 +60,7 @@ function buildCategoryTree(parsed) {
 // of something meaningful ("корневая" = "root", left over from their own
 // default setup). Override known placeholders here.
 const SECTION_NAME_OVERRIDES = {
-  'корневая': 'Товари-бестселери🔥',
+  'корневая': 'Інші товари',
 };
 
 // Walks up parentId links from a leaf category to the top-level section
