@@ -108,7 +108,7 @@ router.get('/meta/sections', async (req, res) => {
          FROM products p JOIN suppliers s ON s.id = p.supplier_id
         WHERE p.available = true AND s.active = true AND p.section IS NOT NULL
         GROUP BY p.section
-        ORDER BY (p.section = 'Товари-бестселери🔥') DESC, p.section ASC`
+        ORDER BY p.section ASC`
     );
     res.json(rows);
   } catch (err) {
