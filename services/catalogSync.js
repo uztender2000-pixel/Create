@@ -1,5 +1,6 @@
 const { pool } = require('../db');
 const { getAdapter } = require('./suppliers');
+const { logEvent } = require('./logger');
 
 // =====================================================================
 // Catalogue synchronisation.
@@ -195,6 +196,12 @@ async function syncSupplier(supplier) {
         WHERE id = $1`,
       [supplier.id, String(err.message).slice(0, 500)]
     );
+    await logEvent({
+      source: 'sync',
+      supplierId: supplier.id,
+      message: `Синхронізація "${supplier.name}" не вдалась: ${err.message}`,
+      detail: err.stack,
+    });
     throw err;
   } finally {
     client.release();

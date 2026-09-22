@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { pool } = require('../db');
 const { getAdapter } = require('./suppliers');
+const { logEvent } = require('./logger');
 
 // =====================================================================
 // Order dispatch.
@@ -103,6 +104,10 @@ async function submitToSupplier(supplierId, rows) {
     adapter = getAdapter(supplier);
   } catch (err) {
     await markFailed(orderIds, err.message);
+    await logEvent({
+      source: 'order', supplierId, message: `Невідомий адаптер для "${supplier.name}": ${err.message}`,
+      detail: `orderIds=${orderIds.join(',')}`,
+    });
     return { supplierId, supplier: supplier.name, submitted: false, reason: 'unknown_adapter', error: err.message };
   }
 
@@ -135,6 +140,11 @@ async function submitToSupplier(supplierId, rows) {
     result = await adapter.createOrder(supplier, payload);
   } catch (err) {
     result = { ok: false, reason: 'adapter_threw', error: err.message };
+    await logEvent({
+      source: 'order', supplierId,
+      message: `"${supplier.name}" не відповів: ${err.message}`,
+      detail: `orderIds=${orderIds.join(',')} groupId=${first.group_id}\n${err.stack || ''}`,
+    });
   }
 
   if (result.ok) {
@@ -156,7 +166,11 @@ async function submitToSupplier(supplierId, rows) {
   // that you place this one supplier's part by hand, as before.
   const message = typeof result.error === 'string' ? result.error : JSON.stringify(result.error || result.reason);
   await markFailed(orderIds, message);
-  console.error(`[dispatch] ${supplier.name}: ${result.reason} — ${message}`);
+  await logEvent({
+    source: 'order', supplierId,
+    message: `"${supplier.name}" відхилив замовлення (${result.reason}): ${message}`,
+    detail: `orderIds=${orderIds.join(',')} groupId=${first.group_id}${result.supplierOrderId ? ` supplierOrderId=${result.supplierOrderId}` : ''}`,
+  });
   return { supplierId, supplier: supplier.name, submitted: false, reason: result.reason, error: message };
 }
 
