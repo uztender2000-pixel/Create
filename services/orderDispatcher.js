@@ -125,7 +125,8 @@ async function submitToSupplier(supplierId, rows) {
       supplierProductId: r.supplier_product_id,
       quantity: r.quantity,
       name: r.product_name,
-      price: r.cost_price,
+      retailPrice: r.unit_price,  // what the customer pays — MyDrop requires this
+      costPrice: r.cost_price,    // your cost — used as drop_price where relevant
     })),
   };
 
