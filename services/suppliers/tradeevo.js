@@ -1,128 +1,63 @@
 const axios = require('axios');
-const crypto = require('crypto');
+const ymlFeed = require('./ymlFeed');
 
 // =====================================================================
 // Adapter: tradeevo
 //
 // TradeEvo is one supplier row that can carry products from several real
 // distributors at once (ERC, ЮГ-Контракт, DC-Link, Юг-Торг, or anything
-// from their own catalogue) — they're all merged behind one account and
-// one catalogue endpoint, so unlike MyDrop there's no per-vendor split
-// needed here: one TradeEvo account = one supplier row in our system.
+// from their own catalogue) — they're all merged behind one account, so
+// unlike MyDrop there's no per-vendor split needed here: one TradeEvo
+// account = one supplier row in our system.
 //
-// Auth (every request): two headers —
-//   Client-ID:     your account id, from Кабінет → API
-//   Authorization: md5("<ClientID>:<ApiSecretKey>")
-// Store the account id in supplier.api_login and the secret in
-// supplier.api_key. Responses are always { Data, Status, ErrorMessage }.
+// IMPORTANT — the REST catalogue methods TradeEvo's own docs page
+// describes (version / productlist / producttransaction, on a domain
+// "api.tradeevo.com") are DEAD: TradeEvo support confirmed that domain
+// doesn't exist and those methods aren't in their current system — the
+// docs page just never got taken down. Do not resurrect that code path
+// without a fresh confirmation from TradeEvo that it's real and live.
 //
-// Catalogue: GET http://api.tradeevo.com/api/productlist
-//   TradeEvo's own field names for each product weren't given to us in
-//   writing — the code below reads several likely candidate names per
-//   field (common in Ukrainian B2B APIs: Id/ProductId/Sku, Name/Title,
-//   Price/RetailPrice, Quantity/Stock/Balance...). VERIFY THIS against a
-//   real response before relying on it: run one sync, then check a
-//   product's row with the SQL console —
-//     SELECT name, price, stock FROM products
-//      WHERE supplier_id = (SELECT id FROM suppliers WHERE code = 'tradeevo')
-//      LIMIT 5;
-//   If names/prices/stock come through empty or wrong, ask TradeEvo
-//   support for one real productlist response and this file's
-//   normalizeProduct() gets a five-minute fix.
+// What's actually live, confirmed two different ways (a working order
+// submission and TradeEvo support directly):
 //
-// Orders: POST to supplier.config.importUrl (copy the FULL url shown on
-// TradeEvo's "Довідник API замовлень" page — it already has your real id
-// in place of <ваш_id>, so there's nothing to guess here). The order id
-// (orders[].id) is chosen BY US, not returned by TradeEvo, so we use our
-// own order row id — that's also what lets a human find it again in the
-// TradeEvo back office if something needs checking by hand.
+//   CATALOGUE — not a REST call. In the TradeEvo cabinet you create an
+//   "XML-канал" (an export channel), pick which products go into it, and
+//   TradeEvo gives you a permanent link to a YML/XML feed with prices,
+//   stock and specs — the same format every other yml_feed supplier
+//   here uses. So catalogue import is simply DELEGATED to ymlFeed:
+//   set this supplier's feed_urls to that channel link and everything
+//   else (parsing, batching, price rules) just works, no TradeEvo-
+//   specific code needed for it.
 //
-// TradeEvo's docs don't show a "get order status" endpoint or a webhook
-// for it yet, so orderStatus stays unsupported until that's confirmed —
-// statuses/ttn will need to come back the same way they do today
-// (checked manually, or via whatever TradeEvo's "apps" callback page
-// turns out to configure once we know what it does).
+//   ORDERS — real REST call: POST to supplier.api_url (the ordinary
+//   "API URL" field in the admin panel's supplier form), which is the
+//   FULL url TradeEvo shows you after creating an "API замовлень"
+//   integration in their cabinet (already includes your account's key,
+//   e.g. https://app.tradeevo.com/api/ImoprtOrders/<key> — note the
+//   misspelling "ImoprtOrders" is intentional on TradeEvo's side, not a
+//   typo to fix). Body shape confirmed against TradeEvo's own worked
+//   example (see the big schema table they sent). No Client-ID/Secret-Key
+//   auth is needed for this endpoint — the key embedded in the url is
+//   the only credential attached to a submitted order.
 // =====================================================================
 
-const CATALOG_URL = 'http://api.tradeevo.com/api/productlist';
-
 const capabilities = {
-  catalog: true,
+  catalog: true,   // delegated to ymlFeed — see fetchCatalog below
   stock: false,
   createOrder: true,
-  orderStatus: false, // not documented yet — see note above
+  orderStatus: false, // no confirmed status/TTN endpoint from TradeEvo yet
 };
 
-function authHeaders(supplier) {
-  const clientId = supplier.api_login;
-  const secret = supplier.api_key;
-  const hash = crypto.createHash('md5').update(`${clientId}:${secret}`).digest('hex');
-  return { 'Client-ID': clientId, Authorization: hash, 'Content-Type': 'application/json' };
-}
-
-// Reads the first present key out of several candidate field-name
-// spellings — a defensive shim for the parts of TradeEvo's schema we
-// haven't seen a real example of yet (see the big comment above).
-function pick(obj, ...candidates) {
-  for (const key of candidates) {
-    if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') return obj[key];
+// Catalogue import: this supplier's feed_urls should be set to the link
+// TradeEvo's "XML-канал" gives you. Nothing TradeEvo-specific to do here.
+async function fetchCatalog(supplier, onBatch, options) {
+  if (!supplier.feed_urls?.length) {
+    throw new Error(
+      `Постачальник "${supplier.name}" (TradeEvo) не має feed_urls — ` +
+      `створіть XML-канал у кабінеті TradeEvo і вкажіть його посилання тут`
+    );
   }
-  return null;
-}
-
-function normalizeProduct(raw) {
-  const price = parseFloat(pick(raw, 'Price', 'price', 'RetailPrice', 'retailPrice') ?? 0);
-  const stockRaw = pick(raw, 'Quantity', 'quantity', 'Stock', 'stock', 'Balance', 'balance');
-  const stock = stockRaw !== null ? parseInt(stockRaw, 10) : null;
-
-  return {
-    supplierProductId: String(pick(raw, 'Sku', 'sku', 'Id', 'id', 'ProductId', 'productId', 'Article', 'article')),
-    name: pick(raw, 'Name', 'name', 'Title', 'title', 'ProductName', 'productName') || '',
-    description: pick(raw, 'Description', 'description') || '',
-    price: Number.isFinite(price) ? price : 0,
-    categoryId: pick(raw, 'CategoryId', 'categoryId') ? String(pick(raw, 'CategoryId', 'categoryId')) : null,
-    categoryName: pick(raw, 'CategoryName', 'categoryName', 'Category', 'category'),
-    section: pick(raw, 'CategoryName', 'categoryName', 'Category', 'category'),
-    pictureUrl: pick(raw, 'Image', 'image', 'ImageUrl', 'imageUrl', 'Picture', 'picture'),
-    pictures: pick(raw, 'Images', 'images') || [],
-    vendorCode: pick(raw, 'Sku', 'sku', 'Article', 'article'),
-    vendor: pick(raw, 'Vendor', 'vendor', 'Brand', 'brand'),
-    params: {},
-    stock: Number.isFinite(stock) ? stock : null,
-    available: stock === null ? true : stock > 0,
-  };
-}
-
-async function fetchCatalog(supplier, onBatch, { batchSize = 500 } = {}) {
-  if (!supplier.api_login || !supplier.api_key) {
-    throw new Error(`Постачальник "${supplier.name}" (TradeEvo) не має Client-ID / ApiSecretKey`);
-  }
-
-  const { data } = await axios.get(CATALOG_URL, {
-    headers: authHeaders(supplier),
-    timeout: 60000,
-  });
-
-  if (data?.Status === false || data?.ErrorMessage) {
-    throw new Error(`TradeEvo productlist: ${data?.ErrorMessage || 'невідома помилка'}`);
-  }
-
-  const items = Array.isArray(data?.Data) ? data.Data : [];
-  let total = 0;
-  let batch = [];
-  for (const raw of items) {
-    batch.push(normalizeProduct(raw));
-    if (batch.length >= batchSize) {
-      await onBatch(batch);
-      total += batch.length;
-      batch = [];
-    }
-  }
-  if (batch.length) {
-    await onBatch(batch);
-    total += batch.length;
-  }
-  return total;
+  return ymlFeed.fetchCatalog(supplier, onBatch, options);
 }
 
 // Splits a customer's full name into TradeEvo's firstName/lastName.
@@ -142,14 +77,11 @@ function splitName(fullName) {
 }
 
 async function createOrder(supplier, order) {
-  if (!supplier.api_login || !supplier.api_key) {
-    return { ok: false, reason: 'not_configured', error: 'Немає Client-ID / ApiSecretKey' };
-  }
-  const importUrl = supplier.config?.importUrl;
+  const importUrl = supplier.api_url;
   if (!importUrl) {
     return {
       ok: false, reason: 'not_configured',
-      error: 'Немає config.importUrl — скопіюйте повну адресу зі сторінки "Довідник API замовлень" в кабінеті TradeEvo',
+      error: 'Немає API URL — вставте адресу, яку TradeEvo видає після створення інтеграції "API замовлень", у поле "API URL" при редагуванні постачальника',
     };
   }
 
@@ -196,7 +128,7 @@ async function createOrder(supplier, order) {
 
   try {
     const { data, status } = await axios.post(importUrl, payload, {
-      headers: authHeaders(supplier),
+      headers: { 'Content-Type': 'application/json' },
       timeout: 20000,
       validateStatus: () => true,
     });
