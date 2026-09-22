@@ -1,5 +1,6 @@
 const express = require('express');
 const { pool } = require('../db');
+const { logEvent } = require('../services/logger');
 
 const router = express.Router();
 
@@ -69,7 +70,11 @@ router.post('/:secret', express.json({ limit: '2mb' }), async (req, res) => {
     );
   } catch (err) {
     // Already responded 200 to MyDrop; just log for our own visibility.
-    console.error('[webhooks/mydrop] failed to process payload:', err.message);
+    await logEvent({
+      source: 'webhook',
+      message: `Вебхук MyDrop не оброблено: ${err.message}`,
+      detail: `body=${JSON.stringify(req.body).slice(0, 1000)}\n${err.stack || ''}`,
+    });
   }
 });
 
