@@ -19,6 +19,7 @@ const SORT_OPTIONS = {
   name_desc: 'p.name DESC',
   popular: 'order_count DESC, p.updated_at DESC',
   newest: 'p.updated_at DESC',
+  random: 'RANDOM()', // used for the homepage's "10 random products" view
 };
 
 // GET /api/products — list available products, paginated and sortable.
