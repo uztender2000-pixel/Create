@@ -38,6 +38,8 @@ app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, max: 300, standardHeaders:
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
+app.use('/api/auth/forgot-password', authLimiter);
+app.use('/api/auth/reset-password', authLimiter);
 
 app.get('/', (req, res) => res.json({ ok: true, service: 'OllShop backend' }));
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
