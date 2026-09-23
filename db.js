@@ -130,6 +130,8 @@ async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_code_expires TIMESTAMPTZ;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS email_code TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS email_code_expires TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_code TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_code_expires TIMESTAMPTZ;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_delivery_method TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city_ref TEXT;
