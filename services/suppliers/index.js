@@ -1,6 +1,7 @@
 const ymlFeed = require('./ymlFeed');
 const mydrop = require('./mydrop');
 const tradeevo = require('./tradeevo');
+const hubber = require('./hubber');
 
 // =====================================================================
 // Supplier adapter registry.
@@ -56,6 +57,7 @@ const ADAPTERS = {
   yml_feed: ymlFeed,
   mydrop: mydrop,
   tradeevo: tradeevo,
+  hubber: hubber,
   // brain: require('./brain'),
   // mti: require('./mti'),
 };
