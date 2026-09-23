@@ -4,6 +4,12 @@ const { requireAdminAuth, requirePermission } = require('../middleware/adminAuth
 
 const router = express.Router();
 
+// Sentinel value for "products with no section" — chosen unlikely to
+// collide with a real category name from any feed. The frontend maps
+// this exact string to the label "Без категорії"; nothing else about it
+// is special to the database.
+const UNCATEGORIZED = '__uncategorized__';
+
 // Whitelist of sort options -> SQL ORDER BY clause. Never interpolate the
 // sort value directly into SQL — always go through this map.
 const SORT_OPTIONS = {
@@ -37,7 +43,8 @@ router.get('/', async (req, res) => {
     const params = [];
 
     if (featured === 'true') conditions.push('p.featured = true');
-    if (section) { params.push(section); conditions.push(`p.section = $${params.length}`); }
+    if (section === UNCATEGORIZED) conditions.push('p.section IS NULL');
+    else if (section) { params.push(section); conditions.push(`p.section = $${params.length}`); }
     if (category_id) { params.push(category_id); conditions.push(`p.category_id = $${params.length}`); }
     if (supplier) { params.push(supplier); conditions.push(`s.code = $${params.length}`); }
     if (q && q.trim()) {
@@ -110,6 +117,21 @@ router.get('/meta/sections', async (req, res) => {
         GROUP BY p.section
         ORDER BY p.section ASC`
     );
+
+    // Products with no section (missing categoryId in the feed, or a
+    // categoryId that isn't in the feed's own <categories> tree) used to
+    // be invisible unless you clicked "Усі товари" — and even there they
+    // were mixed in with everything else. Give them their own browsable
+    // bucket instead, appended after the real sections.
+    const { rows: uncategorized } = await pool.query(
+      `SELECT COUNT(*)::int AS count
+         FROM products p JOIN suppliers s ON s.id = p.supplier_id
+        WHERE p.available = true AND s.active = true AND p.section IS NULL`
+    );
+    if (uncategorized[0].count > 0) {
+      rows.push({ section: UNCATEGORIZED, count: uncategorized[0].count });
+    }
+
     res.json(rows);
   } catch (err) {
     console.error(err);
@@ -123,7 +145,8 @@ router.get('/meta/categories', async (req, res) => {
     const { section } = req.query;
     const conditions = ['p.available = true', 's.active = true', 'p.category_id IS NOT NULL'];
     const params = [];
-    if (section) { params.push(section); conditions.push(`p.section = $${params.length}`); }
+    if (section === UNCATEGORIZED) conditions.push('p.section IS NULL');
+    else if (section) { params.push(section); conditions.push(`p.section = $${params.length}`); }
 
     const { rows } = await pool.query(
       `SELECT p.category_id, p.category_name, p.section, COUNT(*)::int AS count
