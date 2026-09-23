@@ -186,4 +186,73 @@ router.post('/verify-email', requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/auth/forgot-password — { email }. Always responds ok:true
+// (even if the email isn't registered) so a caller can't use this to
+// check which emails exist in the database. If the email IS registered,
+// a 6-digit code is emailed — same code/expiry mechanism as the email
+// verification codes above, just stored in its own column so a pending
+// "verify my email" code and a pending "reset my password" code never
+// clash with each other.
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email обов\'язковий' });
+
+    const { rows } = await pool.query('SELECT id, email FROM users WHERE email = $1', [email.toLowerCase()]);
+    if (rows.length) {
+      const user = rows[0];
+      const code = generateCode();
+      await pool.query(
+        'UPDATE users SET password_reset_code = $1, password_reset_code_expires = $2 WHERE id = $3',
+        [code, codeExpiry(), user.id]
+      );
+      sendEmail(
+        user.email,
+        'Скидання пароля — OllShop',
+        `Ваш код для скидання пароля: ${code}\n\nКод дійсний 15 хвилин. Якщо ви не запитували скидання пароля, просто проігноруйте цей лист.`
+      ).catch((err) => console.error('[forgot-password] email failed:', err.message));
+    }
+
+    // Same response whether or not the email exists.
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося надіслати код' });
+  }
+});
+
+// POST /api/auth/reset-password — { email, code, newPassword }
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body;
+    if (!email || !code || !newPassword) {
+      return res.status(400).json({ error: "Email, код і новий пароль обов'язкові" });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Пароль має бути щонайменше 6 символів' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT id, password_reset_code, password_reset_code_expires FROM users WHERE email = $1',
+      [email.toLowerCase()]
+    );
+    const user = rows[0];
+    if (!user || !user.password_reset_code || user.password_reset_code !== code ||
+        new Date(user.password_reset_code_expires) < new Date()) {
+      return res.status(400).json({ error: 'Невірний або прострочений код' });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      'UPDATE users SET password_hash = $1, password_reset_code = NULL, password_reset_code_expires = NULL WHERE id = $2',
+      [passwordHash, user.id]
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося скинути пароль' });
+  }
+});
+
 module.exports = router;
