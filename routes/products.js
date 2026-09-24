@@ -109,14 +109,22 @@ router.get('/meta/stats', async (req, res) => {
 // GET /api/products/meta/sections — top-level sections across ALL active
 // suppliers, merged. Two suppliers both selling "Побутова техніка" show
 // up as one section, which is what a marketplace should look like.
+//
+// Each row carries both:
+//   section — the raw value stored on products.section (what ?section=
+//             filters against; NEVER translated, so filtering keeps working)
+//   label   — what to actually show the customer (an admin-set translation
+//             via section_translations if one exists, else the raw value)
 router.get('/meta/sections', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT p.section, COUNT(*)::int AS count
-         FROM products p JOIN suppliers s ON s.id = p.supplier_id
+      `SELECT p.section, COALESCE(st.display_name, p.section) AS label, COUNT(*)::int AS count
+         FROM products p
+         JOIN suppliers s ON s.id = p.supplier_id
+         LEFT JOIN section_translations st ON st.raw_name = p.section
         WHERE p.available = true AND s.active = true AND p.section IS NOT NULL
-        GROUP BY p.section
-        ORDER BY p.section ASC`
+        GROUP BY p.section, st.display_name
+        ORDER BY COALESCE(st.display_name, p.section) ASC`
     );
 
     // Products with no section (missing categoryId in the feed, or a
@@ -130,7 +138,7 @@ router.get('/meta/sections', async (req, res) => {
         WHERE p.available = true AND s.active = true AND p.section IS NULL`
     );
     if (uncategorized[0].count > 0) {
-      rows.push({ section: UNCATEGORIZED, count: uncategorized[0].count });
+      rows.push({ section: UNCATEGORIZED, label: 'Без категорії', count: uncategorized[0].count });
     }
 
     res.json(rows);
