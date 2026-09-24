@@ -111,6 +111,58 @@ async function getToken(supplier) {
   return token;
 }
 
+// Masks a secret for safe display: keeps the first/last char, hides the
+// rest, shows the exact length (length matters more than content here —
+// a copy-paste that silently dropped or added a character is the most
+// common cause of "works in the browser, fails from code").
+function maskSecret(value) {
+  if (!value) return { length: 0, preview: '(порожньо)' };
+  const len = value.length;
+  if (len <= 2) return { length: len, preview: '*'.repeat(len) };
+  return { length: len, preview: `${value[0]}${'*'.repeat(len - 2)}${value[len - 1]}` };
+}
+
+// Diagnostic helper (not part of the adapter contract) — used by the
+// admin-only /hubber-debug route to test this supplier's exact stored
+// credentials against the real Hubber /auth endpoint and report back
+// what was actually sent, without ever exposing the real secret.
+async function debugAuth(supplier) {
+  const rawLogin = supplier.api_login || '';
+  const rawKey = supplier.api_key || '';
+  const trimmedLogin = rawLogin.trim();
+  const trimmedKey = rawKey.trim();
+  const companyId = supplier.config?.companyId;
+
+  const info = {
+    baseUrl: baseUrl(supplier),
+    companyId: companyId ?? null,
+    login: { ...maskSecret(rawLogin), hadWhitespace: rawLogin !== trimmedLogin, containsColon: rawLogin.includes(':') },
+    password: { ...maskSecret(rawKey), hadWhitespace: rawKey !== trimmedKey, containsColon: rawKey.includes(':') },
+  };
+
+  if (!trimmedLogin || !trimmedKey) {
+    return { ...info, ok: false, status: null, message: 'api_login або api_key порожні в базі' };
+  }
+
+  try {
+    const res = await axios.get(`${baseUrl(supplier)}/auth`, {
+      auth: { username: trimmedLogin, password: trimmedKey },
+      params: companyId ? { company_id: companyId } : undefined,
+      headers: { accept: 'application/json' },
+      timeout: 15000,
+      validateStatus: () => true,
+    });
+    return {
+      ...info,
+      ok: res.status >= 200 && res.status < 300 && !!res.data?.token,
+      status: res.status,
+      message: res.status >= 400 ? JSON.stringify(res.data) : 'OK — токен отримано',
+    };
+  } catch (err) {
+    return { ...info, ok: false, status: null, message: `Мережева помилка: ${err.message}` };
+  }
+}
+
 async function request(supplier, method, path, { params, data } = {}) {
   const token = await getToken(supplier);
   const res = await axios({
@@ -322,4 +374,4 @@ async function getOrderStatus(supplier, supplierOrderId) {
   };
 }
 
-module.exports = { name: 'hubber', capabilities, fetchCatalog, createOrder, getOrderStatus };
+module.exports = { name: 'hubber', capabilities, fetchCatalog, createOrder, getOrderStatus, debugAuth };
