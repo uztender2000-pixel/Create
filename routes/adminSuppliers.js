@@ -116,6 +116,29 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
+// POST /api/admin/suppliers/:id/hubber-debug — TEMPORARY diagnostic route.
+// Tests this supplier's exact stored credentials against Hubber's real
+// /auth endpoint and reports back masked info about what was actually
+// sent (length, first/last char, whether whitespace or a colon is
+// present) plus Hubber's real response — without ever exposing the full
+// secret. Only meaningful for adapter = 'hubber'. Safe to remove once
+// the Hubber integration is confirmed working end-to-end.
+router.post('/:id/hubber-debug', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM suppliers WHERE id = $1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    if (rows[0].adapter !== 'hubber') {
+      return res.status(400).json({ error: `Цей постачальник використовує адаптер "${rows[0].adapter}", а не hubber` });
+    }
+    const hubber = require('../services/suppliers/hubber');
+    const result = await hubber.debugAuth(rows[0]);
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/suppliers/:id/sync — pull this supplier's catalogue now.
 // Runs in the background so the dashboard gets an immediate answer even on
 // a 40 000-product catalogue; watch last_sync_status for the result.
