@@ -31,8 +31,10 @@ async function initSchema() {
       active            BOOLEAN NOT NULL DEFAULT true,
       sort_order        INTEGER NOT NULL DEFAULT 0,
       last_sync_at      TIMESTAMPTZ,
-      last_sync_status  TEXT,                             -- 'ok' | 'error'
+      last_sync_status  TEXT,                             -- 'ok' | 'error' | 'running'
       last_sync_message TEXT,
+      sync_progress_current INTEGER DEFAULT 0,             -- live progress while status = 'running'
+      sync_progress_total   INTEGER,                       -- NULL when the adapter can't report a total upfront (shows a spinner instead of a %)
       created_at        TIMESTAMPTZ DEFAULT now()
     );
   `);
@@ -132,6 +134,8 @@ async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS email_code_expires TIMESTAMPTZ;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_code TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_code_expires TIMESTAMPTZ;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS sync_progress_current INTEGER DEFAULT 0;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS sync_progress_total INTEGER;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_delivery_method TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city_ref TEXT;
