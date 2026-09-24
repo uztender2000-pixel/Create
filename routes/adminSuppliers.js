@@ -139,6 +139,28 @@ router.post('/:id/hubber-debug', async (req, res) => {
   }
 });
 
+// GET /api/admin/suppliers/:id/sync-status — lightweight poll target for
+// the "Синхронізувати" button's live progress. Cheap on purpose (one
+// indexed row lookup) since the admin panel polls this every ~1.5s while
+// a sync is running.
+router.get('/:id/sync-status', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT last_sync_status AS status, last_sync_message AS message,
+              sync_progress_current AS current, sync_progress_total AS total
+         FROM suppliers WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const row = rows[0];
+    const percent = row.total ? Math.min(100, Math.round((row.current / row.total) * 100)) : null;
+    res.json({ ...row, percent });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/suppliers/:id/sync — pull this supplier's catalogue now.
 // Runs in the background so the dashboard gets an immediate answer even on
 // a 40 000-product catalogue; watch last_sync_status for the result.
