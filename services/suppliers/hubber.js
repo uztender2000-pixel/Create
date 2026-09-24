@@ -194,16 +194,17 @@ async function request(supplier, method, path, { params, data } = {}) {
 // each product's category up to its root. ----
 async function fetchCategoryMap(supplier) {
   const map = new Map(); // id -> { name, parentId, parentName }
+  const PAGE_SIZE = 100; // Hubber's documented and enforced max per page
   let page = 1;
   for (;;) {
-    const res = await request(supplier, 'get', '/category', { params: { format: 'id', limit: 200, page } });
+    const res = await request(supplier, 'get', '/category', { params: { format: 'id', limit: PAGE_SIZE, page } });
     if (res.status >= 400) throw new Error(`Hubber /category HTTP ${res.status}: ${JSON.stringify(res.data)}`);
     const rows = Array.isArray(res.data) ? res.data : [];
     if (!rows.length) break;
     for (const c of rows) {
       map.set(String(c.id), { name: c.name, parentId: c.parent_id ? String(c.parent_id) : null, parentName: c.parent_name || null });
     }
-    if (rows.length < 200) break;
+    if (rows.length < PAGE_SIZE) break;
     page += 1;
   }
   return map;
@@ -283,7 +284,7 @@ function normalizeProduct(p, categoryMap) {
 async function fetchCatalog(supplier, onBatch, options) {
   const categoryMap = await fetchCategoryMap(supplier);
   const catalog = supplier.config?.catalog || 'all'; // 'my' | 'all'
-  const pageLimit = 200;
+  const pageLimit = 100; // Hubber's documented and enforced max per page
 
   let cursor = undefined;
   let total = 0;
