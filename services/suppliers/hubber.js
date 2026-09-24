@@ -306,7 +306,8 @@ async function fetchCatalog(supplier, onBatch, options) {
   const pageLimit = 100; // Hubber's documented and enforced max per page
 
   let cursor = undefined;
-  let total = 0;
+  let imported = 0;
+  let reportedTotal = false;
 
   for (;;) {
     const res = await request(supplier, 'get', '/product/cursor', {
@@ -316,12 +317,24 @@ async function fetchCatalog(supplier, onBatch, options) {
       throw new Error(`Hubber /product/cursor HTTP ${res.status}: ${JSON.stringify(res.data)}`);
     }
 
+    // Best-effort: if Hubber sends a total-count pagination header (as it
+    // does on several other endpoints per the docs), forward it once so
+    // the admin panel can show a real % instead of just a running count.
+    // Harmless no-op if the header isn't there for this endpoint.
+    if (!reportedTotal) {
+      const headerTotal = res.headers?.['x-pagination-total-count'] ?? res.headers?.['x-total-count'];
+      if (headerTotal != null) {
+        options?.onProgress?.(Number(headerTotal));
+        reportedTotal = true;
+      }
+    }
+
     const rows = Array.isArray(res.data) ? res.data : (res.data?.items || []);
     if (!rows.length) break;
 
     const batch = rows.map((p) => normalizeProduct(p, categoryMap));
     await onBatch(batch);
-    total += batch.length;
+    imported += batch.length;
 
     if (rows.length < pageLimit) break;
     // The next cursor is the id of the last item returned, per the doc's
@@ -331,7 +344,7 @@ async function fetchCatalog(supplier, onBatch, options) {
     if (!cursor) break;
   }
 
-  return total;
+  return imported;
 }
 
 // Builds Hubber's single free-text "delivery_data" field from our
