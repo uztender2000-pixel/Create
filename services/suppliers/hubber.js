@@ -85,14 +85,23 @@ async function getToken(supplier) {
   }
 
   const companyId = supplier.config?.companyId;
-  const { data } = await axios.get(`${baseUrl(supplier)}/auth`, {
+  const res = await axios.get(`${baseUrl(supplier)}/auth`, {
     auth: { username: supplier.api_login, password: supplier.api_key }, // CONFIRM: see note 2 above
     params: companyId ? { company_id: companyId } : undefined,
     timeout: 15000,
+    validateStatus: () => true, // handle non-2xx ourselves so the real Hubber error body isn't lost
   });
 
+  if (res.status >= 400) {
+    throw new Error(
+      `Hubber /auth HTTP ${res.status}: ${JSON.stringify(res.data)} ` +
+      `(company_id=${companyId ?? 'не задано'}, api_login=${supplier.api_login ? 'задано' : 'ПОРОЖНЬО'})`
+    );
+  }
+
+  const data = res.data;
   const token = data?.token;
-  if (!token) throw new Error('Hubber /auth не повернув поле "token"');
+  if (!token) throw new Error(`Hubber /auth повернув 200, але без поля "token": ${JSON.stringify(data)}`);
 
   // "expires_at" is a guess at the real field name (doc showed it
   // translated as "термін дії закінчується"); fall back to a 25-minute
