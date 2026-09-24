@@ -197,7 +197,12 @@ async function fetchCategoryMap(supplier) {
   const PAGE_SIZE = 100; // Hubber's documented and enforced max per page
   let page = 1;
   for (;;) {
-    const res = await request(supplier, 'get', '/category', { params: { format: 'id', limit: PAGE_SIZE, page } });
+    // NOTE: no "format" param — leave it at Hubber's default (hash-style
+    // ids), because that's what /product/cursor's category_id values are
+    // in too. Explicitly requesting format=id previously returned a
+    // different id scheme that never matched a product's category_id,
+    // silently breaking the parent-lookup walk below.
+    const res = await request(supplier, 'get', '/category', { params: { limit: PAGE_SIZE, page } });
     if (res.status >= 400) throw new Error(`Hubber /category HTTP ${res.status}: ${JSON.stringify(res.data)}`);
     const rows = Array.isArray(res.data) ? res.data : [];
     if (!rows.length) break;
