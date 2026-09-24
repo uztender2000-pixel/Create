@@ -23,17 +23,12 @@ const axios = require('axios');
 //      "/token" name the translated doc implied). If your account's
 //      base differs, just fill in "API URL" on the supplier.
 //
-//   2. HOW TO GET THE VERY FIRST TOKEN — a real 422 response from /auth
-//      confirmed the endpoint wants "username" and "password", but
-//      Swagger's "Параметри" table only listed company_id — meaning
-//      username/password go through Swagger's separate "Authorize"
-//      (🔒) button, which for a GET request means HTTP Basic Auth in
-//      the Authorization header. Implemented that way, using
-//      supplier.api_login (Hubber account email) as username and
-//      supplier.api_key (account password) as password. STILL NOT
-//      100% confirmed — if the first real sync fails at getToken()
-//      with a 422 mentioning username/password again, Basic Auth was
-//      the wrong guess and this is the one place to change.
+//   2. HOW TO GET THE VERY FIRST TOKEN — CONFIRMED 2026-09-24 via a live
+//      Swagger "Authorize" (basicAuth) call that returned 200 with a
+//      token: GET /auth authenticates with HTTP Basic Auth (Hubber
+//      account email as username, account password as password), no
+//      request body. Implemented using supplier.api_login (email) and
+//      supplier.api_key (password), both trimmed before sending.
 //
 //   3. WHETHER "price" IS COST OR ALREADY A SELL PRICE — Hubber's
 //      product schema has price/old_price sitting next to
@@ -85,8 +80,11 @@ async function getToken(supplier) {
   }
 
   const companyId = supplier.config?.companyId;
+  // .trim() defensively — a stray leading/trailing space from copy-paste
+  // into the admin panel is invisible in the browser but breaks Basic
+  // Auth silently (server sees it as "wrong password").
   const res = await axios.get(`${baseUrl(supplier)}/auth`, {
-    auth: { username: supplier.api_login, password: supplier.api_key }, // CONFIRM: see note 2 above
+    auth: { username: supplier.api_login.trim(), password: supplier.api_key.trim() }, // CONFIRMED: Basic Auth, verified 200 via Swagger 2026-09-24
     params: companyId ? { company_id: companyId } : undefined,
     timeout: 15000,
     validateStatus: () => true, // handle non-2xx ourselves so the real Hubber error body isn't lost
@@ -95,7 +93,7 @@ async function getToken(supplier) {
   if (res.status >= 400) {
     throw new Error(
       `Hubber /auth HTTP ${res.status}: ${JSON.stringify(res.data)} ` +
-      `(company_id=${companyId ?? 'не задано'}, api_login=${supplier.api_login ? 'задано' : 'ПОРОЖНЬО'})`
+      `(company_id=${companyId ?? 'не задано'}, api_login=${supplier.api_login ? 'задано' : 'ПОРОЖНЬО'}, api_key=${supplier.api_key ? 'задано' : 'ПОРОЖНЬО'})`
     );
   }
 
