@@ -289,6 +289,18 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log (created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_event_log_supplier ON event_log (supplier_id);
 
+    -- Lets the admin rename a raw section name coming from a supplier
+    -- feed/API (often in another language, e.g. Hubber's Russian-only
+    -- category names) to a display name shown on the storefront —
+    -- without touching the raw value products.section is matched on.
+    -- Survives re-syncs automatically since it's applied at query time,
+    -- not baked into the products table.
+    CREATE TABLE IF NOT EXISTS section_translations (
+      raw_name     TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      updated_at   TIMESTAMPTZ DEFAULT now()
+    );
+
     CREATE INDEX IF NOT EXISTS idx_products_supplier ON products (supplier_id);
     CREATE INDEX IF NOT EXISTS idx_products_available ON products (available);
     CREATE INDEX IF NOT EXISTS idx_products_section ON products (section);
