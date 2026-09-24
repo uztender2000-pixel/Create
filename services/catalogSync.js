@@ -160,13 +160,47 @@ async function syncSupplier(supplier) {
   const client = await pool.connect();
   let imported = 0;
 
+  // Live progress for the admin panel's "Синхронізувати" button. total
+  // stays null unless the adapter calls onProgress with a real count (not
+  // every API can report one upfront — cursor-paginated ones often can't);
+  // the button just shows a spinner + running count in that case instead
+  // of a %. Written on its own short-lived connection so a slow/large
+  // sync doesn't hold `client` (used for the actual product upserts)
+  // busy with unrelated progress writes.
+  let progressCurrent = 0;
+  let progressTotal = null;
+  async function writeProgress() {
+    try {
+      await pool.query(
+        'UPDATE suppliers SET sync_progress_current = $2, sync_progress_total = $3 WHERE id = $1',
+        [supplier.id, progressCurrent, progressTotal]
+      );
+    } catch (err) {
+      console.error('[sync] progress write failed:', err.message);
+    }
+  }
+
+  await pool.query(
+    `UPDATE suppliers SET last_sync_status = 'running', sync_progress_current = 0, sync_progress_total = NULL WHERE id = $1`,
+    [supplier.id]
+  );
+
   try {
     imported = await adapter.fetchCatalog(
       supplier,
       async (batch) => {
         await upsertBatch(client, supplier, batch, syncStartedAt);
+        progressCurrent += batch.length;
+        await writeProgress();
       },
-      { batchSize: BATCH_SIZE }
+      {
+        batchSize: BATCH_SIZE,
+        // Adapters that can determine the total item count upfront (e.g.
+        // from a pagination header on the first page) call this once;
+        // adapters that don't know about it simply never call it, and
+        // progressTotal just stays null — fully backward compatible.
+        onProgress: (total) => { if (Number.isFinite(total)) progressTotal = total; },
+      }
     );
 
     // Anything this supplier didn't send this time is no longer on sale.
