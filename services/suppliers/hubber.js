@@ -202,7 +202,15 @@ async function fetchCategoryMap(supplier) {
     // in too. Explicitly requesting format=id previously returned a
     // different id scheme that never matched a product's category_id,
     // silently breaking the parent-lookup walk below.
-    const res = await request(supplier, 'get', '/category', { params: { limit: PAGE_SIZE, page } });
+    //
+    // "catalog" isn't documented for /category, but it IS documented for
+    // /product ('my' vs 'all'), and undocumented endpoints on the same
+    // API often share request handling — worth trying since /category
+    // returning only a "my products" subset would explain why most
+    // products (pulled with catalog=all) couldn't find their category
+    // here at all. Harmless if Hubber just ignores it.
+    const catalog = supplier.config?.catalog || 'all';
+    const res = await request(supplier, 'get', '/category', { params: { limit: PAGE_SIZE, page, catalog } });
     if (res.status >= 400) throw new Error(`Hubber /category HTTP ${res.status}: ${JSON.stringify(res.data)}`);
     const rows = Array.isArray(res.data) ? res.data : [];
     if (!rows.length) break;
@@ -215,10 +223,16 @@ async function fetchCategoryMap(supplier) {
   return map;
 }
 
-function resolveSection(categoryId, categoryMap) {
-  if (!categoryId) return null;
+// fallbackName: the product's OWN category_name, straight from the
+// product payload (always present, regardless of whether /category's
+// tree happens to cover that category). Used whenever the id-based
+// walk can't find a match, so a gap in /category's coverage degrades
+// to "grouped by its immediate category name" instead of dumping the
+// product into "Без категорії".
+function resolveSection(categoryId, categoryMap, fallbackName) {
+  if (!categoryId) return fallbackName || null;
   let current = categoryMap.get(String(categoryId));
-  if (!current) return null;
+  if (!current) return fallbackName || null;
   const seen = new Set();
   while (current.parentId && !seen.has(current.parentId)) {
     seen.add(current.parentId);
@@ -269,7 +283,7 @@ function normalizeProduct(p, categoryMap) {
     price: Number(p.price) || 0, // see note 3 at the top of this file
     categoryId: p.category_id ? String(p.category_id) : null,
     categoryName: p.category_name || null,
-    section: resolveSection(p.category_id, categoryMap),
+    section: resolveSection(p.category_id, categoryMap, p.category_name),
     pictureUrl: p.main_picture || null,
     pictures: normalizePictures(p.photos, p.main_picture),
     vendorCode: p.vendor_code || null,
