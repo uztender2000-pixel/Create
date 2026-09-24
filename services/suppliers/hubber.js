@@ -18,21 +18,22 @@ const axios = require('axios');
 // but four things below are still ASSUMPTIONS that need a real API key
 // to confirm — each is marked "CONFIRM:" at the point it matters:
 //
-//   1. BASE URL — the doc's Swagger UI is hosted at
-//      https://office.hubber.pro/api/doc, so this adapter defaults
-//      supplier.api_url to https://office.hubber.pro/api if the admin
-//      panel leaves "API URL" blank. If your real base differs, just
-//      fill in "API URL" on the supplier — nothing here needs editing.
+//   1. BASE URL / PATH — CONFIRMED from a real "Try it out" call:
+//      https://office.hubber.pro/api/v1, endpoint GET /auth (not the
+//      "/token" name the translated doc implied). If your account's
+//      base differs, just fill in "API URL" on the supplier.
 //
-//   2. HOW TO GET THE VERY FIRST TOKEN — the doc shows the /token
-//      response (a JWT + expiry) but not what credentials that endpoint
-//      itself expects, since Swagger's global auth scheme isn't part of
-//      the per-endpoint text. Implemented as HTTP Basic Auth using
-//      supplier.api_login (your Hubber account email) + supplier.api_key
-//      (your Hubber account password) — the same pattern Rozetka's
-//      seller API uses for its /token endpoint. If Hubber instead wants
-//      a fixed API key in a header, this is the one place to change
-//      (see getToken() below).
+//   2. HOW TO GET THE VERY FIRST TOKEN — a real 422 response from /auth
+//      confirmed the endpoint wants "username" and "password", but
+//      Swagger's "Параметри" table only listed company_id — meaning
+//      username/password go through Swagger's separate "Authorize"
+//      (🔒) button, which for a GET request means HTTP Basic Auth in
+//      the Authorization header. Implemented that way, using
+//      supplier.api_login (Hubber account email) as username and
+//      supplier.api_key (account password) as password. STILL NOT
+//      100% confirmed — if the first real sync fails at getToken()
+//      with a 422 mentioning username/password again, Basic Auth was
+//      the wrong guess and this is the one place to change.
 //
 //   3. WHETHER "price" IS COST OR ALREADY A SELL PRICE — Hubber's
 //      product schema has price/old_price sitting next to
@@ -55,7 +56,7 @@ const axios = require('axios');
 // importing wrong data.
 // ---------------------------------------------------------------------
 
-const DEFAULT_BASE_URL = 'https://office.hubber.pro/api';
+const DEFAULT_BASE_URL = 'https://office.hubber.pro/api/v1';
 
 const capabilities = {
   catalog: true,
@@ -84,14 +85,14 @@ async function getToken(supplier) {
   }
 
   const companyId = supplier.config?.companyId;
-  const { data } = await axios.get(`${baseUrl(supplier)}/token`, {
+  const { data } = await axios.get(`${baseUrl(supplier)}/auth`, {
     auth: { username: supplier.api_login, password: supplier.api_key }, // CONFIRM: see note 2 above
     params: companyId ? { company_id: companyId } : undefined,
     timeout: 15000,
   });
 
   const token = data?.token;
-  if (!token) throw new Error('Hubber /token не повернув поле "token"');
+  if (!token) throw new Error('Hubber /auth не повернув поле "token"');
 
   // "expires_at" is a guess at the real field name (doc showed it
   // translated as "термін дії закінчується"); fall back to a 25-minute
