@@ -27,7 +27,14 @@ const BATCH_SIZE = 500;
 // Batch upsert via UNNEST: one round-trip per 500 products instead of 500
 // round-trips. On a 40 000-product catalogue this is the difference
 // between a sync that finishes in a minute and one that doesn't finish.
-async function upsertBatch(client, supplier, items, syncStartedAt) {
+//
+// forceIncluded: when true, every item in this batch is written with
+// included = true regardless of the supplier's manual_selection default —
+// used by routes/adminProducts.js's "import selected" endpoint, where an
+// admin explicitly picked these exact products from a live catalogue
+// browse (see hubber.js's browseCatalog) and they should go straight on
+// sale, not land in the "not yet decided" pile.
+async function upsertBatch(client, supplier, items, syncStartedAt, forceIncluded = false) {
   if (!items.length) return 0;
 
   const cols = {
@@ -75,7 +82,7 @@ async function upsertBatch(client, supplier, items, syncStartedAt) {
   // has to actively pick it in the "Товари постачальника" screen. A product
   // we already know keeps whatever the admin already decided (see the
   // ON CONFLICT clause below, which never touches `included`).
-  const defaultIncluded = !supplier.manual_selection;
+  const defaultIncluded = forceIncluded || !supplier.manual_selection;
 
   await client.query(
     `
@@ -169,7 +176,19 @@ async function upsertBatch(client, supplier, items, syncStartedAt) {
 }
 
 // Syncs one supplier. Returns { supplier, imported, deactivated }.
+//
+// manual_selection suppliers NEVER go through the full-catalogue path
+// below — that would defeat the entire point of manual selection (it
+// exists specifically to stop the server from pulling/storing a whole
+// remote catalogue just to hide most of it behind included=false). They
+// go through refreshManualSelectionSupplier() instead, which only ever
+// touches products already imported. New products are discovered by the
+// admin through the live "Огляд каталогу" screen (routes/adminProducts.js
+// browse + import-selected), which never writes to the database until
+// the admin explicitly picks something.
 async function syncSupplier(supplier) {
+  if (supplier.manual_selection) return refreshManualSelectionSupplier(supplier);
+
   const adapter = getAdapter(supplier);
   if (!adapter.capabilities?.catalog) {
     throw new Error(`Адаптер "${supplier.adapter}" не вміє віддавати каталог`);
@@ -261,6 +280,92 @@ async function syncSupplier(supplier) {
   }
 }
 
+// Lightweight refresh for manual_selection suppliers: updates price/stock/
+// availability on products we ALREADY imported, and does so by asking the
+// adapter to filter server-side (options.editedSince) so we only receive
+// what actually changed recently — never the whole remote catalogue.
+//
+// Deliberately different from syncSupplier in three ways:
+//   1. editedSince bounds the pull to "changed since last look" (defaults
+//      to 7 days back the very first time).
+//   2. Any product in the returned batches that we DON'T already have is
+//      dropped before it reaches the database — discovering new products
+//      is the live "Огляд каталогу" screen's job, not an automatic sync's.
+//   3. Nothing gets marked unavailable for "not seen this round" — a
+//      filtered delta only ever shows a slice of the catalogue, so absence
+//      from it says nothing about whether a product still exists.
+async function refreshManualSelectionSupplier(supplier) {
+  const adapter = getAdapter(supplier);
+  if (!adapter.capabilities?.catalog) {
+    throw new Error(`Адаптер "${supplier.adapter}" не вміє віддавати каталог`);
+  }
+
+  const syncStartedAt = new Date();
+  const client = await pool.connect();
+  let imported = 0;
+  let skippedNew = 0;
+
+  await pool.query(
+    `UPDATE suppliers SET last_sync_status = 'running', sync_progress_current = 0, sync_progress_total = NULL WHERE id = $1`,
+    [supplier.id]
+  );
+
+  try {
+    const editedSince = supplier.last_sync_at || new Date(Date.now() - 7 * 24 * 3600 * 1000);
+
+    await adapter.fetchCatalog(
+      supplier,
+      async (batch) => {
+        const ids = batch.map((p) => String(p.supplierProductId));
+        const { rows: known } = await client.query(
+          `SELECT supplier_product_id FROM products WHERE supplier_id = $1 AND supplier_product_id = ANY($2::text[])`,
+          [supplier.id, ids]
+        );
+        const knownIds = new Set(known.rows ? known.rows.map((r) => r.supplier_product_id) : known.map((r) => r.supplier_product_id));
+        const alreadyImported = batch.filter((p) => knownIds.has(String(p.supplierProductId)));
+        skippedNew += batch.length - alreadyImported.length;
+        if (alreadyImported.length) {
+          await upsertBatch(client, supplier, alreadyImported, syncStartedAt);
+          imported += alreadyImported.length;
+        }
+        await pool.query('UPDATE suppliers SET sync_progress_current = $2 WHERE id = $1', [supplier.id, imported]);
+      },
+      { editedSince }
+    );
+
+    await client.query(
+      `UPDATE suppliers
+          SET last_sync_at = now(), last_sync_status = 'ok',
+              last_sync_message = $2
+        WHERE id = $1`,
+      [
+        supplier.id,
+        `Оновлено ${imported} раніше доданих товарів (лише зміни з ${editedSince.toISOString().slice(0, 10)}). ` +
+          `Нові товари постачальника сюди НЕ підвантажуються — додайте їх через «Товари» → «Огляд каталогу».` +
+          (skippedNew ? ` Пропущено ${skippedNew} нових/невідомих товарів.` : ''),
+      ]
+    );
+
+    return { supplier: supplier.name, imported, deactivated: 0 };
+  } catch (err) {
+    await pool.query(
+      `UPDATE suppliers
+          SET last_sync_at = now(), last_sync_status = 'error', last_sync_message = $2
+        WHERE id = $1`,
+      [supplier.id, String(err.message).slice(0, 500)]
+    );
+    await logEvent({
+      source: 'sync',
+      supplierId: supplier.id,
+      message: `Оновлення "${supplier.name}" не вдалось: ${err.message}`,
+      detail: err.stack,
+    });
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Syncs every active supplier. One failing supplier never stops the rest —
 // with a marketplace pulling from several sources that matters: BRAIN
 // being down for an hour shouldn't empty your MTI catalogue.
@@ -294,4 +399,4 @@ async function syncSupplierById(supplierId) {
   return syncSupplier(rows[0]);
 }
 
-module.exports = { syncAllSuppliers, syncSupplier, syncSupplierById };
+module.exports = { syncAllSuppliers, syncSupplier, syncSupplierById, upsertBatch };
