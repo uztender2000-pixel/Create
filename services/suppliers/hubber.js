@@ -295,6 +295,36 @@ function normalizeProduct(p, categoryMap) {
     // see note 4 style caveat: if products you expect to see are
     // missing after a sync, this is the first place to check.
     available: p.availability === 1 || p.availability === true,
+    // Everything else Hubber's schema exposes on a product that our own
+    // columns don't have room for, kept verbatim in products.raw_meta so
+    // the admin "add products" filter panel can offer every selection
+    // Hubber itself supports (see /product/cursor#marketplace params):
+    //   statusId / status         -> filter by ?status= (4, 7)
+    //   isTop                     -> filter by ?mark=top
+    //   editedAt                  -> filter by ?start_edited_at/end_edited_at
+    //   brandId                   -> a more precise brand filter than the
+    //                                free-text vendor/brand name
+    //   hubberSupplierId/Name/Rating -> Hubber is itself an aggregator of
+    //     many underlying suppliers (its own ?company_id= filter) — this
+    //     is the ACTUAL seller behind the product, not our "Hubber"
+    //     supplier row, and is usually the single most useful filter for
+    //     deciding which products to trust and import.
+    //   categoryCommission/profit -> Hubber's own suggested margin figures
+    meta: {
+      statusId: Number.isFinite(p.status_id) ? p.status_id : null,
+      status: p.status || null,
+      isTop: p.is_top === 1 || p.is_top === true,
+      editedAt: p.edited_at || null,
+      moderatedAt: p.moderated_at || null,
+      createdAt: p.created_at || null,
+      brandId: Number.isFinite(p.brand_id) ? p.brand_id : null,
+      hubberSupplierId: p.supplier_id != null ? String(p.supplier_id) : null,
+      hubberSupplierName: p.supplier_name || null,
+      hubberSupplierRating: Number.isFinite(p.supplier_rating) ? p.supplier_rating : null,
+      categoryCommission: Number.isFinite(p.category_commission) ? p.category_commission : null,
+      profit: Number.isFinite(p.profit) ? p.profit : null,
+      oldPrice: Number.isFinite(p.old_price) ? p.old_price : null,
+    },
   };
 }
 

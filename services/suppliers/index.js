@@ -42,7 +42,14 @@ const hubber = require('./hubber');
 //   supplierProductId, name, description, price,
 //   categoryId, categoryName, section,
 //   pictureUrl, pictures[], vendorCode, vendor,
-//   params{}, stock, available
+//   params{}, stock, available,
+//   meta{}  // optional — anything the supplier's API exposes that has no
+//           // dedicated column above (moderation status, "top" flag, the
+//           // supplier's own edited-at timestamp, an underlying
+//           // sub-supplier's id/name/rating, etc). Stored as-is in
+//           // products.raw_meta so the admin product-selection filter
+//           // panel can offer it without a schema change. Adapters that
+//           // have nothing extra can simply omit this field.
 // }
 //
 // NORMALIZED ORDER (what createOrder receives):
