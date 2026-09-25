@@ -36,7 +36,13 @@ const hubber = require('./hubber');
 //   // (routes/adminProducts.js "Огляд каталогу") without ever pulling it
 //   // onto our server; only the items the admin explicitly imports end up
 //   // in `products`. `filters` shape is adapter-specific (see hubber.js).
-//   async browseCatalog(supplier, filters, cursor) -> { items, nextCursor, hasMore }
+//   async browseCatalog(supplier, filters, page) -> { items, page, total, hasMore }
+//
+//   // Optional, requires capabilities.liveBrowse: the supplier's own
+//   // category/subcategory tree, flat with parentId, so the admin's
+//   // "Огляд каталогу" filter panel can offer a category → subcategory
+//   // cascade that maps to browseCatalog's `filters.categoryId`.
+//   async fetchCategories(supplier) -> [{ id, name, parentId }]
 //
 //   // Optional: refresh only prices and stock, much cheaper than a full
 //   // catalogue pull. Same batch shape, but only supplierProductId,

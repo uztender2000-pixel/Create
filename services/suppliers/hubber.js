@@ -196,7 +196,18 @@ async function request(supplier, method, path, { params, data } = {}) {
 // no full ancestor chain. To fill our "section" (top-level grouping
 // used in the sidebar) we fetch every category once per sync and walk
 // each product's category up to its root. ----
+//
+// Cached for a few minutes per supplier — browseCatalog() below calls
+// this on every single filter change/page turn in the admin's live
+// catalogue browser, and re-fetching Hubber's whole category list
+// (itself paginated) on every keystroke would be wasteful and slow.
+const categoryMapCache = new Map(); // supplierId -> { map, expiresAt }
+const CATEGORY_CACHE_TTL_MS = 5 * 60 * 1000;
+
 async function fetchCategoryMap(supplier) {
+  const cached = categoryMapCache.get(supplier.id);
+  if (cached && cached.expiresAt > Date.now()) return cached.map;
+
   const map = new Map(); // id -> { name, parentId, parentName }
   const PAGE_SIZE = 100; // Hubber's documented and enforced max per page
   let page = 1;
@@ -224,8 +235,21 @@ async function fetchCategoryMap(supplier) {
     if (rows.length < PAGE_SIZE) break;
     page += 1;
   }
+
+  categoryMapCache.set(supplier.id, { map, expiresAt: Date.now() + CATEGORY_CACHE_TTL_MS });
   return map;
 }
+
+// Public (adapter-contract) version for the admin "Огляд каталогу" filter
+// panel: a flat array with parentId so the frontend can build a
+// category → subcategory cascade, instead of the internal Map shape
+// fetchCategoryMap uses for the section-resolving walk above.
+async function fetchCategories(supplier) {
+  const map = await fetchCategoryMap(supplier);
+  return [...map.entries()].map(([id, c]) => ({ id, name: c.name, parentId: c.parentId }));
+}
+
+
 
 // fallbackName: the product's OWN category_name, straight from the
 // product payload (always present, regardless of whether /category's
@@ -350,6 +374,11 @@ function toHubberDateTime(value) {
 // and our database is only touched later, for the handful of products the
 // admin actually clicks "Імпортувати" on (see routes/adminProducts.js).
 //
+// Uses /product#marketplace (page-based), NOT /product/cursor#marketplace —
+// the cursor endpoint doesn't support filtering by category_id at all,
+// while this one does, which is why fetchCatalog (the full sync) and
+// browseCatalog deliberately use two different Hubber endpoints.
+//
 // filters (all optional):
 //   id            — Hubber's own product id, full-match per the doc
 //   name          — partial match on product name
@@ -357,19 +386,20 @@ function toHubberDateTime(value) {
 //   markTop       — true -> only "top" marked products
 //   companyId     — Hubber's OWN underlying-supplier id (their aggregation
 //                   of many real sellers) — NOT our suppliers.id
+//   categoryId    — Hubber's own category or subcategory id (see
+//                   fetchCategories() for the full tree)
 //   priceFrom/priceTo
 //   availability  — 0 | 1
 //   status        — 4 | 7 (Hubber's moderation status_id)
 //   startEditedAt / endEditedAt — Date | ISO string
-// cursor: opaque string from the previous page's nextCursor, or undefined
-//         for the first page.
+// page: 1-based page number (Hubber's own "page" param), defaults to 1.
 // ---------------------------------------------------------------------
-async function browseCatalog(supplier, filters = {}, cursor) {
+async function browseCatalog(supplier, filters = {}, page = 1) {
   const categoryMap = await fetchCategoryMap(supplier);
   const pageLimit = 50;
 
   const params = {
-    cursor,
+    page: Math.max(1, parseInt(page, 10) || 1),
     limit: pageLimit,
     view: 'full',
     catalog: supplier.config?.catalog || 'all',
@@ -378,6 +408,7 @@ async function browseCatalog(supplier, filters = {}, cursor) {
     mark: filters.markTop ? 'top' : undefined,
     vendor_code: filters.vendorCode || undefined,
     company_id: filters.companyId || undefined,
+    category_id: filters.categoryId || undefined,
     availability: filters.availability != null && filters.availability !== '' ? Number(filters.availability) : undefined,
     status: filters.status || undefined,
     start_edited_at: filters.startEditedAt ? toHubberDateTime(filters.startEditedAt) : undefined,
@@ -391,16 +422,19 @@ async function browseCatalog(supplier, filters = {}, cursor) {
   if (filters.priceFrom != null && filters.priceFrom !== '') params['price[from]'] = Number(filters.priceFrom);
   if (filters.priceTo != null && filters.priceTo !== '') params['price[to]'] = Number(filters.priceTo);
 
-  const res = await request(supplier, 'get', '/product/cursor', { params });
+  const res = await request(supplier, 'get', '/product', { params });
   if (res.status >= 400) {
-    throw new Error(`Hubber /product/cursor HTTP ${res.status}: ${JSON.stringify(res.data)}`);
+    throw new Error(`Hubber /product HTTP ${res.status}: ${JSON.stringify(res.data)}`);
   }
 
   const rows = Array.isArray(res.data) ? res.data : (res.data?.items || []);
   const items = rows.map((p) => normalizeProduct(p, categoryMap));
-  const nextCursor = rows.length === pageLimit ? rows[rows.length - 1].id : null;
 
-  return { items, nextCursor, hasMore: nextCursor != null };
+  const headerTotal = res.headers?.['x-pagination-total-count'] ?? res.headers?.['x-total-count'];
+  const total = headerTotal != null ? Number(headerTotal) : null;
+  const hasMore = total != null ? params.page * pageLimit < total : rows.length === pageLimit;
+
+  return { items, page: params.page, total, hasMore };
 }
 
 // GET /product/cursor#marketplace — cursor-paginated listing of every
@@ -525,4 +559,4 @@ async function getOrderStatus(supplier, supplierOrderId) {
   };
 }
 
-module.exports = { name: 'hubber', capabilities, fetchCatalog, browseCatalog, createOrder, getOrderStatus, debugAuth };
+module.exports = { name: 'hubber', capabilities, fetchCatalog, browseCatalog, fetchCategories, createOrder, getOrderStatus, debugAuth };
