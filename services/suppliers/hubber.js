@@ -289,17 +289,48 @@ function normalizePictures(photos, mainPicture) {
 // object — the shape our product-detail specs table expects. Handles
 // {name, value}, {attributeId, value} and a couple of common variants;
 // silently skips anything it doesn't recognise rather than throwing.
-function normalizeParams(attributes) {
+// Turns a product's specs into one flat { "Назва характеристики": "значення" }
+// map, from TWO different shapes Hubber's schema mixes on the same product:
+//
+//   options: { "Тип": "Универсальная батарея", ... }             — already
+//     flat strings, used as-is.
+//
+//   attributes: [{ name: "Диаметр", values: [{ value: "21 см", id: ... }] }]
+//     — values is an array of OBJECTS, not strings. The bug this replaced
+//     called value.join(', ') directly on that array, which stringifies
+//     each {value, id} object as "[object Object]" instead of reading its
+//     .value field — that literal text is what ended up saved to
+//     products.params and shown in the storefront's characteristics table.
+function normalizeParams(options, attributes) {
   const params = {};
-  if (!Array.isArray(attributes)) return params;
-  for (const a of attributes) {
-    if (!a || typeof a !== 'object') continue;
-    const key = a.name || a.attribute_name || a.attributeName;
-    const value = a.value ?? a.values ?? a.value_name;
-    if (key && value !== undefined && value !== null) {
-      params[String(key)] = Array.isArray(value) ? value.join(', ') : String(value);
+
+  if (options && typeof options === 'object' && !Array.isArray(options)) {
+    for (const [key, value] of Object.entries(options)) {
+      if (key && value != null && value !== '') params[key] = String(value);
     }
   }
+
+  if (Array.isArray(attributes)) {
+    for (const a of attributes) {
+      if (!a || typeof a !== 'object') continue;
+      const key = a.name || a.attribute_name || a.attributeName;
+      if (!key) continue;
+
+      let value;
+      if (Array.isArray(a.values)) {
+        // Each entry is {value, id} per the doc — pull out just .value.
+        value = a.values
+          .map((v) => (v && typeof v === 'object' ? v.value : v))
+          .filter((v) => v != null && v !== '')
+          .join(', ');
+      } else if (a.value != null) {
+        value = Array.isArray(a.value) ? a.value.join(', ') : String(a.value);
+      }
+
+      if (value) params[String(key)] = value;
+    }
+  }
+
   return params;
 }
 
@@ -316,7 +347,7 @@ function normalizeProduct(p, categoryMap) {
     pictures: normalizePictures(p.photos, p.main_picture),
     vendorCode: p.vendor_code || null,
     vendor: p.brand || null,
-    params: normalizeParams(p.attributes),
+    params: normalizeParams(p.options, p.attributes),
     stock: Number.isFinite(p.stock_quantity) ? p.stock_quantity : null,
     // availability: 1 = on sale. status_id semantics aren't fully
     // documented, so we deliberately don't also filter on status here —
