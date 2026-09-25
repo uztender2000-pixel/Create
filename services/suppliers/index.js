@@ -19,11 +19,24 @@ const hubber = require('./hubber');
 // ---------------------------------------------------------------------
 // module.exports = {
 //   name: 'brain',
-//   capabilities: { catalog, stock, createOrder, orderStatus },  // booleans
+//   capabilities: { catalog, stock, createOrder, orderStatus, liveBrowse },  // booleans
 //
 //   // Pull the whole catalogue, handing normalized products to onBatch in
 //   // chunks. Must return the total number of products passed through.
+//   // options.editedSince (Date/ISO string), when the adapter supports it,
+//   // narrows the pull to only items changed since that moment — used for
+//   // the manual_selection "lightweight refresh" path so a supplier with
+//   // liveBrowse never needs a full pull just to update prices/stock.
 //   async fetchCatalog(supplier, onBatch, options) -> number
+//
+//   // Optional, requires capabilities.liveBrowse: ONE page of normalized
+//   // products matching `filters`, queried straight from the supplier's
+//   // own server-side filters — nothing is written to our database. Lets
+//   // an admin browse/filter a manual_selection supplier's full catalogue
+//   // (routes/adminProducts.js "Огляд каталогу") without ever pulling it
+//   // onto our server; only the items the admin explicitly imports end up
+//   // in `products`. `filters` shape is adapter-specific (see hubber.js).
+//   async browseCatalog(supplier, filters, cursor) -> { items, nextCursor, hasMore }
 //
 //   // Optional: refresh only prices and stock, much cheaper than a full
 //   // catalogue pull. Same batch shape, but only supplierProductId,
