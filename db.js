@@ -35,6 +35,13 @@ async function initSchema() {
       last_sync_message TEXT,
       sync_progress_current INTEGER DEFAULT 0,             -- live progress while status = 'running'
       sync_progress_total   INTEGER,                       -- NULL when the adapter can't report a total upfront (shows a spinner instead of a %)
+      -- true for suppliers whose catalogue updates itself via an API adapter
+      -- (Hubber, MyDrop, TradeEvo...) rather than a merchant-curated YML feed.
+      -- When true, a product a sync brings in for the FIRST time is NOT shown
+      -- on the storefront until an admin explicitly includes it (see
+      -- products.included below) — the admin picks what to sell instead of
+      -- everything the supplier has being on sale automatically.
+      manual_selection  BOOLEAN NOT NULL DEFAULT false,
       created_at        TIMESTAMPTZ DEFAULT now()
     );
   `);
@@ -66,6 +73,18 @@ async function initSchema() {
       vendor              TEXT,
       stock               INTEGER,                   -- units in stock when the supplier reports a number
       available           BOOLEAN DEFAULT true,
+      -- Admin curation flag for manual_selection suppliers (see suppliers
+      -- table). Meaningless for ordinary feed suppliers, where "on sale"
+      -- is decided by available alone (see routes/products.js).
+      included            BOOLEAN NOT NULL DEFAULT true,
+      -- Everything the supplier's API returned that doesn't have its own
+      -- column, kept as-is so the admin filter panel can filter on it
+      -- without a schema change every time an adapter exposes something
+      -- new: e.g. for Hubber — status_id, is_top, edited_at, brand_id,
+      -- the underlying Hubber supplier's own id/name/rating, category
+      -- commission, profit. Adapters that don't have anything extra just
+      -- leave this as '{}'.
+      raw_meta            JSONB NOT NULL DEFAULT '{}',
       featured            BOOLEAN DEFAULT false,
       last_seen_at        TIMESTAMPTZ DEFAULT now(), -- last time this product appeared in a sync
       updated_at          TIMESTAMPTZ DEFAULT now(),
@@ -305,10 +324,42 @@ async function initSchema() {
       updated_at   TIMESTAMPTZ DEFAULT now()
     );
 
+    -- ---------------------------------------------------------------------
+    -- 5. Admin-owned category tree. Independent of any supplier's own
+    --    category_name/section — this is YOUR storefront's navigation,
+    --    which an admin builds by hand (mainly for manual_selection
+    --    suppliers) and assigns products into via product_categories.
+    --    Self-referencing parent_id gives unlimited category/subcategory
+    --    nesting; the admin UI only needs two levels (category + sub-
+    --    category) but the schema doesn't force that limit.
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS categories (
+      id          SERIAL PRIMARY KEY,
+      parent_id   INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+      name        TEXT NOT NULL,
+      slug        TEXT,
+      sort_order  INTEGER NOT NULL DEFAULT 0,
+      created_at  TIMESTAMPTZ DEFAULT now(),
+      updated_at  TIMESTAMPTZ DEFAULT now()
+    );
+
+    -- Many-to-many: a product can sit in more than one subcategory at once
+    -- (e.g. "Навушники" AND "Розпродаж").
+    CREATE TABLE IF NOT EXISTS product_categories (
+      product_id  BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+      created_at  TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (product_id, category_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_products_supplier ON products (supplier_id);
     CREATE INDEX IF NOT EXISTS idx_products_available ON products (available);
     CREATE INDEX IF NOT EXISTS idx_products_section ON products (section);
     CREATE INDEX IF NOT EXISTS idx_products_category ON products (category_id);
+    CREATE INDEX IF NOT EXISTS idx_products_included ON products (included);
+    CREATE INDEX IF NOT EXISTS idx_products_raw_meta ON products USING GIN (raw_meta);
+    CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories (parent_id);
+    CREATE INDEX IF NOT EXISTS idx_product_categories_category ON product_categories (category_id);
     CREATE INDEX IF NOT EXISTS idx_orders_group ON orders (group_id);
     CREATE INDEX IF NOT EXISTS idx_orders_supplier ON orders (supplier_id);
   `);
