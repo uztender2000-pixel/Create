@@ -1,6 +1,8 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAdminAuth, requirePermission } = require('../middleware/adminAuth');
+const { getAdapter } = require('../services/suppliers');
+const { upsertBatch } = require('../services/catalogSync');
 
 const router = express.Router();
 router.use(requireAdminAuth, requirePermission('settings'));
@@ -294,5 +296,133 @@ function buildFilterWhere(f) {
 
   return { where: conditions.join(' AND '), params };
 }
+
+// =====================================================================
+// Live catalogue browsing — the whole point of this section is that the
+// server never bulk-loads a manual_selection supplier's catalogue. This
+// proxies straight to the supplier's own API (adapter.browseCatalog),
+// filtered server-side by Hubber/etc itself, one page (~50 items) at a
+// time, and writes NOTHING to our database. See services/suppliers/
+// hubber.js's browseCatalog() for exactly what's sent.
+// =====================================================================
+
+// GET /api/admin/products/browse — one live page from the supplier's own
+// API. Query params: supplier_id (required), cursor (from a previous
+// page's next_cursor), plus whatever the adapter's browseCatalog accepts —
+// for Hubber: id, name, vendor_code, mark_top, company_id, price_from,
+// price_to, availability, status, edited_from, edited_to.
+router.get('/browse', async (req, res) => {
+  try {
+    const { supplier_id, cursor } = req.query;
+    if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
+
+    const { rows: supRows } = await pool.query('SELECT * FROM suppliers WHERE id = $1', [supplier_id]);
+    if (!supRows.length) return res.status(404).json({ error: 'Постачальника не знайдено' });
+    const supplier = supRows[0];
+    if (!supplier.manual_selection) {
+      return res.status(400).json({ error: 'Живий перегляд доступний лише для постачальників із ручним відбором' });
+    }
+
+    const adapter = getAdapter(supplier);
+    if (!adapter.capabilities?.liveBrowse || typeof adapter.browseCatalog !== 'function') {
+      return res.status(400).json({ error: `Адаптер "${supplier.adapter}" не підтримує живий перегляд каталогу` });
+    }
+
+    const filters = {
+      id: req.query.id,
+      name: req.query.name,
+      vendorCode: req.query.vendor_code,
+      markTop: req.query.mark_top === 'true',
+      companyId: req.query.company_id,
+      priceFrom: req.query.price_from,
+      priceTo: req.query.price_to,
+      availability: req.query.availability,
+      status: req.query.status,
+      startEditedAt: req.query.edited_from,
+      endEditedAt: req.query.edited_to,
+    };
+
+    const { items, nextCursor, hasMore } = await adapter.browseCatalog(supplier, filters, cursor || undefined);
+
+    // Flag which of these are already in our database (and, if so,
+    // whether they're already on sale) — one small indexed query against
+    // exactly the ~50 ids on this page, not a catalogue-wide scan.
+    const ids = items.map((p) => String(p.supplierProductId));
+    let statusById = new Map();
+    if (ids.length) {
+      const { rows } = await pool.query(
+        `SELECT supplier_product_id, included FROM products WHERE supplier_id = $1 AND supplier_product_id = ANY($2::text[])`,
+        [supplier.id, ids]
+      );
+      statusById = new Map(rows.map((r) => [r.supplier_product_id, r.included]));
+    }
+
+    res.json({
+      items: items.map((p) => ({
+        ...p,
+        alreadyImported: statusById.has(String(p.supplierProductId)),
+        included: statusById.get(String(p.supplierProductId)) ?? false,
+      })),
+      nextCursor,
+      hasMore,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'Failed to browse catalogue' });
+  }
+});
+
+// POST /api/admin/products/import-selected
+// body: { supplier_id, items: [ <normalized product objects, exactly as
+//         returned by GET /browse above> ] }
+// Writes ONLY these specific products to the database, included = true —
+// this is the one place a manual_selection supplier's products actually
+// reach our server/database outside of refreshing what's already there.
+router.post('/import-selected', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { supplier_id, items } = req.body;
+    if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: "items[] обов'язковий" });
+    if (items.length > 200) return res.status(400).json({ error: 'За раз можна імпортувати не більше 200 товарів' });
+
+    const { rows: supRows } = await pool.query('SELECT * FROM suppliers WHERE id = $1', [supplier_id]);
+    if (!supRows.length) return res.status(404).json({ error: 'Постачальника не знайдено' });
+    const supplier = supRows[0];
+
+    const normalized = items
+      .filter((p) => p && p.supplierProductId != null && p.name)
+      .map((p) => ({
+        supplierProductId: p.supplierProductId,
+        name: p.name,
+        description: p.description,
+        price: p.price,
+        categoryId: p.categoryId,
+        categoryName: p.categoryName,
+        section: p.section,
+        pictureUrl: p.pictureUrl,
+        pictures: p.pictures,
+        vendorCode: p.vendorCode,
+        vendor: p.vendor,
+        params: p.params,
+        stock: p.stock,
+        available: p.available,
+        meta: p.meta,
+      }));
+    if (!normalized.length) return res.status(400).json({ error: 'Жоден переданий товар не має коректної форми' });
+
+    await client.query('BEGIN');
+    const count = await upsertBatch(client, supplier, normalized, new Date(), /* forceIncluded */ true);
+    await client.query('COMMIT');
+
+    res.json({ ok: true, imported: count });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error(err);
+    res.status(500).json({ error: err.message || 'Failed to import products' });
+  } finally {
+    client.release();
+  }
+});
 
 module.exports = router;

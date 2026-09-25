@@ -35,7 +35,12 @@ router.get('/', async (req, res) => {
          ) pc ON pc.supplier_id = s.id
         ORDER BY s.sort_order, s.id`
     );
-    res.json(rows);
+    // live_browse: whether this supplier's adapter can filter/page its
+    // catalogue live without our server storing it (see adminProducts.js
+    // /browse) — the frontend uses this to show/hide "Огляд каталогу".
+    const adapterCaps = new Map(listAdapters().map((a) => [a.key, a.capabilities]));
+    const withCaps = rows.map((s) => ({ ...s, live_browse: !!adapterCaps.get(s.adapter)?.liveBrowse }));
+    res.json(withCaps);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load suppliers' });
