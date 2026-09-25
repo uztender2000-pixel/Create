@@ -58,6 +58,10 @@ const capabilities = {
   stock: false,   // no separate lightweight price/stock-only endpoint documented
   createOrder: true,
   orderStatus: true,
+  // Supports browseCatalog(): live, server-side-filtered, single-page
+  // catalogue queries that never get written to our database. Powers the
+  // manual_selection "Огляд каталогу" screen (routes/adminProducts.js).
+  liveBrowse: true,
 };
 
 function baseUrl(supplier) {
@@ -328,8 +332,86 @@ function normalizeProduct(p, categoryMap) {
   };
 }
 
+// Hubber's date filters want 'YYYY-MM-DD HH:mm:ss' per the doc's own
+// example ('2021-01-01 00:00:00'), not a full ISO string with a T/Z.
+function toHubberDateTime(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+// ---------------------------------------------------------------------
+// Live catalogue browsing — powers the admin "Огляд каталогу" screen for
+// manual_selection suppliers. Queries Hubber's own filters directly and
+// returns ONE page of normalized products WITHOUT writing anything to our
+// database — this is the whole point of the feature: an admin can filter
+// and page through Hubber's entire catalogue (tens of thousands of items)
+// while the server only ever holds one ~50-row page in memory at a time,
+// and our database is only touched later, for the handful of products the
+// admin actually clicks "Імпортувати" on (see routes/adminProducts.js).
+//
+// filters (all optional):
+//   id            — Hubber's own product id, full-match per the doc
+//   name          — partial match on product name
+//   vendorCode    — full match on article/vendor_code
+//   markTop       — true -> only "top" marked products
+//   companyId     — Hubber's OWN underlying-supplier id (their aggregation
+//                   of many real sellers) — NOT our suppliers.id
+//   priceFrom/priceTo
+//   availability  — 0 | 1
+//   status        — 4 | 7 (Hubber's moderation status_id)
+//   startEditedAt / endEditedAt — Date | ISO string
+// cursor: opaque string from the previous page's nextCursor, or undefined
+//         for the first page.
+// ---------------------------------------------------------------------
+async function browseCatalog(supplier, filters = {}, cursor) {
+  const categoryMap = await fetchCategoryMap(supplier);
+  const pageLimit = 50;
+
+  const params = {
+    cursor,
+    limit: pageLimit,
+    view: 'full',
+    catalog: supplier.config?.catalog || 'all',
+    id: filters.id || undefined,
+    name: filters.name || undefined,
+    mark: filters.markTop ? 'top' : undefined,
+    vendor_code: filters.vendorCode || undefined,
+    company_id: filters.companyId || undefined,
+    availability: filters.availability != null && filters.availability !== '' ? Number(filters.availability) : undefined,
+    status: filters.status || undefined,
+    start_edited_at: filters.startEditedAt ? toHubberDateTime(filters.startEditedAt) : undefined,
+    end_edited_at: filters.endEditedAt ? toHubberDateTime(filters.endEditedAt) : undefined,
+  };
+  // Hubber documents "price" as a nested {from, to} object; the safest
+  // real-world guess for how a query string carries that is bracket
+  // notation (price[from]=1&price[to]=100), the common convention for
+  // this style of API. Sent as separate top-level keys since axios
+  // won't serialize a plain nested object the way Hubber's doc implies.
+  if (filters.priceFrom != null && filters.priceFrom !== '') params['price[from]'] = Number(filters.priceFrom);
+  if (filters.priceTo != null && filters.priceTo !== '') params['price[to]'] = Number(filters.priceTo);
+
+  const res = await request(supplier, 'get', '/product/cursor', { params });
+  if (res.status >= 400) {
+    throw new Error(`Hubber /product/cursor HTTP ${res.status}: ${JSON.stringify(res.data)}`);
+  }
+
+  const rows = Array.isArray(res.data) ? res.data : (res.data?.items || []);
+  const items = rows.map((p) => normalizeProduct(p, categoryMap));
+  const nextCursor = rows.length === pageLimit ? rows[rows.length - 1].id : null;
+
+  return { items, nextCursor, hasMore: nextCursor != null };
+}
+
 // GET /product/cursor#marketplace — cursor-paginated listing of every
 // product Hubber makes available to your marketplace account.
+//
+// options.editedSince (Date | ISO string), when given, is forwarded as
+// start_edited_at so HUBBER filters server-side — used by the manual-
+// selection "lightweight refresh" path (see catalogSync.js) so we never
+// pull the full remote catalogue just to update prices/stock on products
+// already imported. Full, unfiltered calls (options.editedSince absent)
+// should only ever happen for suppliers WITHOUT manual_selection.
 async function fetchCatalog(supplier, onBatch, options) {
   const categoryMap = await fetchCategoryMap(supplier);
   const catalog = supplier.config?.catalog || 'all'; // 'my' | 'all'
@@ -341,7 +423,13 @@ async function fetchCatalog(supplier, onBatch, options) {
 
   for (;;) {
     const res = await request(supplier, 'get', '/product/cursor', {
-      params: { cursor, limit: pageLimit, view: 'full', catalog },
+      params: {
+        cursor,
+        limit: pageLimit,
+        view: 'full',
+        catalog,
+        start_edited_at: options?.editedSince ? toHubberDateTime(options.editedSince) : undefined,
+      },
     });
     if (res.status >= 400) {
       throw new Error(`Hubber /product/cursor HTTP ${res.status}: ${JSON.stringify(res.data)}`);
@@ -437,4 +525,4 @@ async function getOrderStatus(supplier, supplierOrderId) {
   };
 }
 
-module.exports = { name: 'hubber', capabilities, fetchCatalog, createOrder, getOrderStatus, debugAuth };
+module.exports = { name: 'hubber', capabilities, fetchCatalog, browseCatalog, createOrder, getOrderStatus, debugAuth };
