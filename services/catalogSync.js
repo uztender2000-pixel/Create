@@ -45,6 +45,7 @@ async function upsertBatch(client, supplier, items, syncStartedAt) {
     vendor: [],
     stock: [],
     available: [],
+    rawMeta: [],
   };
 
   for (const p of items) {
@@ -64,14 +65,25 @@ async function upsertBatch(client, supplier, items, syncStartedAt) {
     cols.vendor.push(p.vendor || null);
     cols.stock.push(Number.isFinite(p.stock) ? p.stock : null);
     cols.available.push(p.available !== false);
+    // Adapter-specific extras (status, "top" flag, underlying sub-supplier,
+    // edited-at, etc — see the adapter contract in services/suppliers/index.js).
+    cols.rawMeta.push(JSON.stringify(p.meta || {}));
   }
+
+  // For a manual_selection supplier, a product that's NEW to our database
+  // starts out NOT shown on the storefront (included = false) — the admin
+  // has to actively pick it in the "Товари постачальника" screen. A product
+  // we already know keeps whatever the admin already decided (see the
+  // ON CONFLICT clause below, which never touches `included`).
+  const defaultIncluded = !supplier.manual_selection;
 
   await client.query(
     `
     INSERT INTO products (
       supplier_id, supplier_product_id, name, description, price, retail_price,
       category_id, category_name, section, picture_url, pictures,
-      vendor_code, params, vendor, stock, available, last_seen_at, updated_at
+      vendor_code, params, vendor, stock, available, raw_meta, included,
+      last_seen_at, updated_at
     )
     SELECT
       $1,
@@ -91,15 +103,17 @@ async function upsertBatch(client, supplier, items, syncStartedAt) {
       t.vendor,
       t.stock,
       t.available,
+      t.raw_meta::jsonb,
+      $18::boolean,
       $17::timestamptz, $17::timestamptz
     FROM UNNEST(
       $2::text[], $3::text[], $4::text[], $5::numeric[], $6::text[], $7::text[],
       $8::text[], $9::text[], $10::text[], $11::text[], $12::text[], $13::text[],
-      $14::int[], $15::boolean[]
+      $14::int[], $15::boolean[], $19::text[]
     ) AS t(
       supplier_product_id, name, description, price, category_id, category_name,
       section, picture_url, pictures, vendor_code, params, vendor,
-      stock, available
+      stock, available, raw_meta
     )
     ON CONFLICT (supplier_id, supplier_product_id) DO UPDATE SET
       name          = EXCLUDED.name,
@@ -122,6 +136,9 @@ async function upsertBatch(client, supplier, items, syncStartedAt) {
       vendor        = EXCLUDED.vendor,
       stock         = EXCLUDED.stock,
       available     = EXCLUDED.available,
+      raw_meta      = EXCLUDED.raw_meta,
+      -- included is DELIBERATELY absent here: whether this product is on
+      -- sale is the admin's decision, and a resync must never overwrite it.
       last_seen_at  = EXCLUDED.last_seen_at,
       updated_at    = EXCLUDED.updated_at
     `,
@@ -143,6 +160,8 @@ async function upsertBatch(client, supplier, items, syncStartedAt) {
       cols.available,
       Number(supplier.markup_percent) || 0,
       syncStartedAt,
+      defaultIncluded,
+      cols.rawMeta,
     ]
   );
 
