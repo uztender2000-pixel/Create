@@ -31,7 +31,7 @@ const SORT_OPTIONS = {
 // ?sort=... ?page=1&limit=24
 router.get('/', async (req, res) => {
   try {
-    const { featured, section, category_id, q, supplier } = req.query;
+    const { featured, section, category_id, q, supplier, shop_category_id } = req.query;
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
     const offset = (page - 1) * limit;
@@ -40,7 +40,11 @@ router.get('/', async (req, res) => {
 
     // Only sell what's available AND from a supplier that's switched on —
     // deactivating a supplier now hides its whole catalogue in one click.
-    const conditions = ['p.available = true', 's.active = true'];
+    // For a manual_selection supplier (catalogue updates itself via an API,
+    // e.g. Hubber/MyDrop/TradeEvo) a product also has to be admin-included;
+    // for an ordinary feed supplier `included` is always true and this
+    // condition is a no-op.
+    const conditions = ['p.available = true', 's.active = true', '(s.manual_selection = false OR p.included = true)'];
     const params = [];
 
     if (featured === 'true') conditions.push('p.featured = true');
@@ -48,6 +52,14 @@ router.get('/', async (req, res) => {
     else if (section) { params.push(section); conditions.push(`p.section = $${params.length}`); }
     if (category_id) { params.push(category_id); conditions.push(`p.category_id = $${params.length}`); }
     if (supplier) { params.push(supplier); conditions.push(`s.code = $${params.length}`); }
+    // shop_category_id filters by the admin's own category tree (see
+    // routes/adminCategories.js) rather than the raw supplier category —
+    // this is what lets manually-curated subcategories appear as normal
+    // storefront navigation.
+    if (shop_category_id) {
+      params.push(shop_category_id);
+      conditions.push(`EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id = p.id AND pc.category_id = $${params.length})`);
+    }
     if (q && q.trim()) {
       params.push(`%${q.trim()}%`);
       conditions.push(`(p.name ILIKE $${params.length} OR p.vendor_code ILIKE $${params.length})`);
@@ -172,6 +184,34 @@ router.get('/meta/categories', async (req, res) => {
   }
 });
 
+// GET /api/products/meta/shop-categories — the admin's own category tree
+// (see routes/adminCategories.js), each with how many products currently
+// on sale sit in it. Used for storefront navigation alongside/instead of
+// the raw supplier sections above.
+router.get('/meta/shop-categories', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.parent_id, c.name, c.slug, c.sort_order,
+              COALESCE(pc.count, 0)::int AS count
+         FROM categories c
+         LEFT JOIN (
+           SELECT pc.category_id, COUNT(*)::int AS count
+             FROM product_categories pc
+             JOIN products p ON p.id = pc.product_id
+             JOIN suppliers s ON s.id = p.supplier_id
+            WHERE p.available = true AND s.active = true
+              AND (s.manual_selection = false OR p.included = true)
+            GROUP BY pc.category_id
+         ) pc ON pc.category_id = c.id
+        ORDER BY c.parent_id NULLS FIRST, c.sort_order, c.name`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load shop categories' });
+  }
+});
+
 // GET /api/products/:id — single product for a product-detail page.
 // supplier_product_id and cost price stay server-side; a customer has no
 // business knowing what you paid or what the item is called upstream.
@@ -187,7 +227,16 @@ router.get('/:id', async (req, res) => {
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json(rows[0]);
+
+    const { rows: cats } = await pool.query(
+      `SELECT c.id, c.name, c.parent_id
+         FROM product_categories pc JOIN categories c ON c.id = pc.category_id
+        WHERE pc.product_id = $1
+        ORDER BY c.name`,
+      [req.params.id]
+    );
+
+    res.json({ ...rows[0], shop_categories: cats });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load product' });

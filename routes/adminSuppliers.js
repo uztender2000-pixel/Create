@@ -12,6 +12,7 @@ router.use(requireAdminAuth, requirePermission('settings'));
 const SAFE_COLUMNS = `
   s.id, s.code, s.name, s.adapter, s.feed_urls, s.api_url, s.api_login,
   s.config, s.markup_percent, s.auto_order, s.active, s.sort_order,
+  s.manual_selection,
   s.last_sync_at, s.last_sync_status, s.last_sync_message, s.created_at,
   (s.api_key IS NOT NULL AND s.api_key <> '') AS has_api_key
 `;
@@ -22,12 +23,14 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT ${SAFE_COLUMNS},
               COALESCE(pc.total, 0)     AS product_count,
-              COALESCE(pc.available, 0) AS available_count
+              COALESCE(pc.available, 0) AS available_count,
+              COALESCE(pc.included, 0)  AS included_count
          FROM suppliers s
          LEFT JOIN (
            SELECT supplier_id,
                   COUNT(*)::int AS total,
-                  COUNT(*) FILTER (WHERE available)::int AS available
+                  COUNT(*) FILTER (WHERE available)::int AS available,
+                  COUNT(*) FILTER (WHERE included)::int AS included
              FROM products GROUP BY supplier_id
          ) pc ON pc.supplier_id = s.id
         ORDER BY s.sort_order, s.id`
@@ -50,22 +53,24 @@ router.post('/', async (req, res) => {
   try {
     const {
       code, name, adapter, feed_urls, api_url, api_key, api_login,
-      config, markup_percent, auto_order, active, sort_order,
+      config, markup_percent, auto_order, active, sort_order, manual_selection,
     } = req.body;
 
     if (!code || !name) return res.status(400).json({ error: "code і name обов'язкові" });
 
     const { rows } = await pool.query(
       `INSERT INTO suppliers (code, name, adapter, feed_urls, api_url, api_key, api_login,
-                              config, markup_percent, auto_order, active, sort_order)
+                              config, markup_percent, auto_order, active, sort_order, manual_selection)
        VALUES ($1, $2, COALESCE($3::text, 'yml_feed'), COALESCE($4::text[], '{}'::text[]),
                $5::text, $6::text, $7::text,
                COALESCE($8::jsonb, '{}'::jsonb), COALESCE($9::numeric, 0),
-               COALESCE($10::boolean, false), COALESCE($11::boolean, true), COALESCE($12::integer, 0))
+               COALESCE($10::boolean, false), COALESCE($11::boolean, true), COALESCE($12::integer, 0),
+               COALESCE($13::boolean, false))
        RETURNING id`,
       [
         code.trim(), name.trim(), adapter, feed_urls, api_url, api_key, api_login,
         config ? JSON.stringify(config) : null, markup_percent, auto_order, active, sort_order,
+        manual_selection,
       ]
     );
 
@@ -84,26 +89,28 @@ router.patch('/:id', async (req, res) => {
   try {
     const {
       name, adapter, feed_urls, api_url, api_key, api_login,
-      config, markup_percent, auto_order, active, sort_order,
+      config, markup_percent, auto_order, active, sort_order, manual_selection,
     } = req.body;
 
     const { rows } = await pool.query(
       `UPDATE suppliers SET
-         name           = COALESCE($2, name),
-         adapter        = COALESCE($3, adapter),
-         feed_urls      = COALESCE($4, feed_urls),
-         api_url        = COALESCE($5, api_url),
-         api_key        = COALESCE($6, api_key),
-         api_login      = COALESCE($7, api_login),
-         config         = COALESCE($8, config),
-         markup_percent = COALESCE($9, markup_percent),
-         auto_order     = COALESCE($10, auto_order),
-         active         = COALESCE($11, active),
-         sort_order     = COALESCE($12, sort_order)
+         name              = COALESCE($2, name),
+         adapter           = COALESCE($3, adapter),
+         feed_urls         = COALESCE($4, feed_urls),
+         api_url           = COALESCE($5, api_url),
+         api_key           = COALESCE($6, api_key),
+         api_login         = COALESCE($7, api_login),
+         config            = COALESCE($8, config),
+         markup_percent    = COALESCE($9, markup_percent),
+         auto_order        = COALESCE($10, auto_order),
+         active            = COALESCE($11, active),
+         sort_order        = COALESCE($12, sort_order),
+         manual_selection  = COALESCE($13, manual_selection)
        WHERE id = $1 RETURNING id`,
       [
         req.params.id, name, adapter, feed_urls, api_url, api_key, api_login,
         config ? JSON.stringify(config) : null, markup_percent, auto_order, active, sort_order,
+        manual_selection,
       ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
