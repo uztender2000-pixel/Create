@@ -155,11 +155,19 @@ async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_code_expires TIMESTAMPTZ;
     ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS sync_progress_current INTEGER DEFAULT 0;
     ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS sync_progress_total INTEGER;
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS manual_selection BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_delivery_method TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city_ref TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_branch TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_courier_address TEXT;
+
+    -- Added for the manual product-selection feature; safe to run even if
+    -- the CREATE TABLE above already ran and created products/suppliers
+    -- without these columns (pre-existing databases never re-run CREATE
+    -- TABLE, so any new column needs its own ADD COLUMN IF NOT EXISTS).
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS included BOOLEAN NOT NULL DEFAULT true;
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS raw_meta JSONB NOT NULL DEFAULT '{}';
 
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INTEGER;
