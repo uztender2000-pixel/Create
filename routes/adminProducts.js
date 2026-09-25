@@ -306,14 +306,46 @@ function buildFilterWhere(f) {
 // hubber.js's browseCatalog() for exactly what's sent.
 // =====================================================================
 
+// GET /api/admin/products/browse-categories — the supplier's OWN category
+// tree (flat, with parent_id), for the "Огляд каталогу" filter panel's
+// category → subcategory cascade. Cached briefly on the adapter side
+// (see hubber.js's fetchCategoryMap), so this is cheap to call whenever
+// the admin opens the filter panel.
+router.get('/browse-categories', async (req, res) => {
+  try {
+    const { supplier_id } = req.query;
+    if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
+
+    const { rows: supRows } = await pool.query('SELECT * FROM suppliers WHERE id = $1', [supplier_id]);
+    if (!supRows.length) return res.status(404).json({ error: 'Постачальника не знайдено' });
+    const supplier = supRows[0];
+
+    const adapter = getAdapter(supplier);
+    if (typeof adapter.fetchCategories !== 'function') {
+      return res.json([]); // adapter doesn't expose a category tree — filter panel just hides the field
+    }
+    res.json(await adapter.fetchCategories(supplier));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'Failed to load supplier categories' });
+  }
+});
+
 // GET /api/admin/products/browse — one live page from the supplier's own
-// API. Query params: supplier_id (required), cursor (from a previous
-// page's next_cursor), plus whatever the adapter's browseCatalog accepts —
-// for Hubber: id, name, vendor_code, mark_top, company_id, price_from,
-// price_to, availability, status, edited_from, edited_to.
+// API. Query params: supplier_id (required), page (1-based, default 1),
+// plus whatever the adapter's browseCatalog accepts — for Hubber: id,
+// name, vendor_code, mark_top, company_id, category_id, price_from,
+// price_to, availability, status, edited_from, edited_to — plus our own
+// adapter-agnostic extras applied after the fact: stock_min (only show
+// items with at least this many units left).
+//
+// Products already in OUR database for this supplier are dropped from the
+// result entirely (not just flagged) — that's the "не показувати вже
+// додані" behaviour, checked against exactly this page's ~50 ids, so it
+// stays cheap regardless of how large the supplier's remote catalogue is.
 router.get('/browse', async (req, res) => {
   try {
-    const { supplier_id, cursor } = req.query;
+    const { supplier_id, page } = req.query;
     if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
 
     const { rows: supRows } = await pool.query('SELECT * FROM suppliers WHERE id = $1', [supplier_id]);
@@ -334,6 +366,7 @@ router.get('/browse', async (req, res) => {
       vendorCode: req.query.vendor_code,
       markTop: req.query.mark_top === 'true',
       companyId: req.query.company_id,
+      categoryId: req.query.category_id || req.query.subcategory_id || undefined,
       priceFrom: req.query.price_from,
       priceTo: req.query.price_to,
       availability: req.query.availability,
@@ -341,31 +374,28 @@ router.get('/browse', async (req, res) => {
       startEditedAt: req.query.edited_from,
       endEditedAt: req.query.edited_to,
     };
+    const stockMin = req.query.stock_min !== undefined && req.query.stock_min !== '' ? Number(req.query.stock_min) : null;
 
-    const { items, nextCursor, hasMore } = await adapter.browseCatalog(supplier, filters, cursor || undefined);
+    const { items: rawItems, page: pageNum, total, hasMore } = await adapter.browseCatalog(supplier, filters, page || 1);
 
-    // Flag which of these are already in our database (and, if so,
-    // whether they're already on sale) — one small indexed query against
-    // exactly the ~50 ids on this page, not a catalogue-wide scan.
-    const ids = items.map((p) => String(p.supplierProductId));
-    let statusById = new Map();
+    // Already-in-our-catalogue check, scoped to just this page's ids.
+    const ids = rawItems.map((p) => String(p.supplierProductId));
+    let alreadyImportedIds = new Set();
     if (ids.length) {
       const { rows } = await pool.query(
-        `SELECT supplier_product_id, included FROM products WHERE supplier_id = $1 AND supplier_product_id = ANY($2::text[])`,
+        `SELECT supplier_product_id FROM products WHERE supplier_id = $1 AND supplier_product_id = ANY($2::text[])`,
         [supplier.id, ids]
       );
-      statusById = new Map(rows.map((r) => [r.supplier_product_id, r.included]));
+      alreadyImportedIds = new Set(rows.map((r) => r.supplier_product_id));
     }
 
-    res.json({
-      items: items.map((p) => ({
-        ...p,
-        alreadyImported: statusById.has(String(p.supplierProductId)),
-        included: statusById.get(String(p.supplierProductId)) ?? false,
-      })),
-      nextCursor,
-      hasMore,
+    const items = rawItems.filter((p) => {
+      if (alreadyImportedIds.has(String(p.supplierProductId))) return false;
+      if (stockMin != null && !(Number.isFinite(p.stock) && p.stock >= stockMin)) return false;
+      return true;
     });
+
+    res.json({ items, page: pageNum, total, hasMore });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || 'Failed to browse catalogue' });
@@ -374,14 +404,17 @@ router.get('/browse', async (req, res) => {
 
 // POST /api/admin/products/import-selected
 // body: { supplier_id, items: [ <normalized product objects, exactly as
-//         returned by GET /browse above> ] }
+//         returned by GET /browse above> ], category_ids?: [1, 2] }
 // Writes ONLY these specific products to the database, included = true —
 // this is the one place a manual_selection supplier's products actually
 // reach our server/database outside of refreshing what's already there.
+// category_ids, if given, are assigned to every imported product in the
+// same step — for when the supplier's own category doesn't match your
+// site's structure and you already know where these belong.
 router.post('/import-selected', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { supplier_id, items } = req.body;
+    const { supplier_id, items, category_ids } = req.body;
     if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: "items[] обов'язковий" });
     if (items.length > 200) return res.status(400).json({ error: 'За раз можна імпортувати не більше 200 товарів' });
@@ -413,8 +446,20 @@ router.post('/import-selected', async (req, res) => {
 
     await client.query('BEGIN');
     const count = await upsertBatch(client, supplier, normalized, new Date(), /* forceIncluded */ true);
-    await client.query('COMMIT');
 
+    if (Array.isArray(category_ids) && category_ids.length) {
+      const supplierProductIds = normalized.map((p) => String(p.supplierProductId));
+      await client.query(
+        `INSERT INTO product_categories (product_id, category_id)
+         SELECT p.id, cid
+           FROM products p, UNNEST($3::int[]) cid
+          WHERE p.supplier_id = $1 AND p.supplier_product_id = ANY($2::text[])
+         ON CONFLICT DO NOTHING`,
+        [supplier.id, supplierProductIds, category_ids]
+      );
+    }
+
+    await client.query('COMMIT');
     res.json({ ok: true, imported: count });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
