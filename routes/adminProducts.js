@@ -379,7 +379,10 @@ function parseBrowseFilters(q) {
 // Query params: supplier_id (required), start_page (1-based; omit or 1 to
 // start a fresh search, or pass back the previous response's
 // next_start_page to keep going), plus price_from/price_to/availability/
-// status/edited_from/edited_to.
+// status/edited_from/edited_to (sent to Hubber itself), plus stock_min —
+// NOT a Hubber filter (their API has none for stock), applied here as
+// each raw page comes back, so it's already baked into the list rather
+// than something the admin has to also remember to apply afterwards.
 const CHUNK_PAGE_SIZE = 100;      // Hubber's documented max per page
 const MAX_PAGES_PER_CALL = 5;     // ≈500 raw products scanned per HTTP round-trip, worst case — kept small so one slow Hubber response can't stack into a request that times out on OUR side too
 
@@ -401,6 +404,7 @@ router.get('/browse', async (req, res) => {
     }
 
     const filters = parseBrowseFilters(req.query);
+    const stockMin = req.query.stock_min !== undefined && req.query.stock_min !== '' ? Number(req.query.stock_min) : null;
     let page = Math.max(1, parseInt(req.query.start_page, 10) || 1);
     const collected = [];
     let pagesScanned = 0;
@@ -418,7 +422,13 @@ router.get('/browse', async (req, res) => {
         );
         const alreadyImportedIds = new Set(rows.map((r) => r.supplier_product_id));
         for (const p of rawItems) {
-          if (!alreadyImportedIds.has(String(p.supplierProductId))) collected.push(p);
+          if (alreadyImportedIds.has(String(p.supplierProductId))) continue;
+          // Hubber has no server-side stock filter — applied here, during
+          // list-formation, so a product below the threshold never makes
+          // it into the returned list at all (not a downstream grid
+          // filter the admin has to remember to also apply).
+          if (stockMin != null && !(Number.isFinite(p.stock) && p.stock >= stockMin)) continue;
+          collected.push(p);
         }
       }
 
