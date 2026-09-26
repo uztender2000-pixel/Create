@@ -337,19 +337,55 @@ function buildFacetWhere(f, excludeField) {
 // Live catalogue browsing — the whole point of this section is that the
 // server never bulk-loads a manual_selection supplier's catalogue. This
 // proxies straight to the supplier's own API (adapter.browseCatalog),
-// filtered server-side by Hubber/etc itself, one page (~50 items) at a
-// time, and writes NOTHING to our database. See services/suppliers/
-// hubber.js's browseCatalog() for exactly what's sent.
+// filtered server-side by Hubber/etc itself, and writes NOTHING to our
+// database. See services/suppliers/hubber.js's browseCatalog() for
+// exactly what's sent.
 // =====================================================================
 
+// Same normalized-filter shape used by both endpoints below, built once
+// from the request's query params so /browse and /browse-categories can
+// never silently diverge on what a given field means.
+function parseBrowseFilters(q) {
+  return {
+    id: q.id,
+    name: q.name,
+    vendorCode: q.vendor_code,
+    markTop: q.mark_top === 'true',
+    companyId: q.company_id,
+    categoryId: q.category_id || q.subcategory_id || undefined,
+    priceFrom: q.price_from,
+    priceTo: q.price_to,
+    availability: q.availability,
+    status: q.status,
+    startEditedAt: q.edited_from,
+    endEditedAt: q.edited_to,
+  };
+}
+
 // GET /api/admin/products/browse-categories — the supplier's OWN category
-// tree (flat, with parent_id), for the "Огляд каталогу" filter panel's
-// category → subcategory cascade. Cached briefly on the adapter side
-// (see hubber.js's fetchCategoryMap), so this is cheap to call whenever
-// the admin opens the filter panel.
+// tree, ONE LEVEL AT A TIME (top-level by default, or the children of
+// `parent_id` when given — matching the filter panel's category →
+// subcategory cascade, which only ever needs one level open at once).
+//
+// "Active": every OTHER filter currently applied (status, availability,
+// price, mark/top, company_id, edited dates — everything Hubber itself
+// can filter on) is passed straight through, and each category in the
+// list gets a cheap existence check (one limit=1 request per category,
+// run in parallel) so a category with ZERO matching products for the
+// current filters is simply left out — not just hidden with a count of
+// "0" that still makes the list look enormous. Bounded to one tree level
+// at a time is what keeps this from becoming hundreds of requests.
+//
+// stock_min is NOT one of the filters checked here: Hubber's API has no
+// server-side stock filter, so we can't ask "does category X have any
+// item with stock ≥ N" without pulling real product data — the one thing
+// this whole feature exists to avoid. The category list may therefore
+// still include a category that turns out to have nothing once stock_min
+// is applied to the actual search; there's no way around that without
+// bulk-loading, so /browse (below) is what gives the honest final answer.
 router.get('/browse-categories', async (req, res) => {
   try {
-    const { supplier_id } = req.query;
+    const { supplier_id, parent_id } = req.query;
     if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
 
     const { rows: supRows } = await pool.query('SELECT * FROM suppliers WHERE id = $1', [supplier_id]);
@@ -360,28 +396,66 @@ router.get('/browse-categories', async (req, res) => {
     if (typeof adapter.fetchCategories !== 'function') {
       return res.json([]); // adapter doesn't expose a category tree — filter panel just hides the field
     }
-    res.json(await adapter.fetchCategories(supplier));
+
+    const allCategories = await adapter.fetchCategories(supplier);
+    const byId = new Map(allCategories.map((c) => [String(c.id), c]));
+    const level = parent_id
+      ? allCategories.filter((c) => String(c.parentId) === String(parent_id))
+      : allCategories.filter((c) => !c.parentId || !byId.has(String(c.parentId)));
+
+    const filters = parseBrowseFilters(req.query);
+    const hasOtherFilters = Object.values(filters).some((v) => v != null && v !== '' && v !== false);
+
+    if (!hasOtherFilters || typeof adapter.browseCatalog !== 'function') {
+      // Nothing narrowing the results yet — no need to spend a request per
+      // category, just show the whole level as-is.
+      return res.json(level);
+    }
+
+    const withMatches = await Promise.all(
+      level.map(async (c) => {
+        try {
+          const { items } = await adapter.browseCatalog(supplier, { ...filters, categoryId: c.id }, 1, 1);
+          return items.length > 0 ? c : null;
+        } catch {
+          return c; // if the existence check itself fails, don't hide the category — fail open
+        }
+      })
+    );
+    res.json(withMatches.filter(Boolean));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || 'Failed to load supplier categories' });
   }
 });
 
-// GET /api/admin/products/browse — one live page from the supplier's own
-// API. Query params: supplier_id (required), page (1-based, default 1),
-// plus whatever the adapter's browseCatalog accepts — for Hubber: id,
-// name, vendor_code, mark_top, company_id, category_id, price_from,
-// price_to, availability, status, edited_from, edited_to — plus our own
-// adapter-agnostic extras applied after the fact: stock_min (only show
-// items with at least this many units left).
+// GET /api/admin/products/browse — a full search, not "one page": given the
+// current filters, walks the supplier's catalogue (internally, across as
+// many of the supplier's own pages as it takes) and returns a batch of
+// TARGET matching products — every single one already filtered for
+// already-imported and stock_min, so nothing in the response is ever a
+// placeholder the admin can't actually pick. Only ever runs when the admin
+// explicitly asks for it (the "Сформувати перелік" / "Знайти ще" buttons on
+// the frontend) — never automatically, and never as a side effect of
+// paging through a stale list.
 //
-// Products already in OUR database for this supplier are dropped from the
-// result entirely (not just flagged) — that's the "не показувати вже
-// додані" behaviour, checked against exactly this page's ~50 ids, so it
-// stays cheap regardless of how large the supplier's remote catalogue is.
+// Query params: supplier_id (required), start_page (1-based; omit or 1 to
+// start a fresh search, or pass back the previous response's next_start_
+// page to keep searching further for "Знайти ще"), plus the same filters
+// as /browse-categories above, plus stock_min (our own post-filter, since
+// Hubber has no server-side stock filter).
+//
+// Bounded by MAX_SUPPLIER_PAGES so one click can never trigger an
+// unbounded crawl of the supplier's entire catalogue — if that cap is hit
+// before TARGET matches are found, the response says so (`capped: true`)
+// so the admin can narrow the filter instead of blindly clicking "Знайти
+// ще" over and over.
+const TARGET_RESULTS = 60;
+const MAX_SUPPLIER_PAGES = 20; // ≈2000 raw products scanned per click, worst case
+
 router.get('/browse', async (req, res) => {
   try {
-    const { supplier_id, page } = req.query;
+    const { supplier_id } = req.query;
     if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
 
     const { rows: supRows } = await pool.query('SELECT * FROM suppliers WHERE id = $1', [supplier_id]);
@@ -396,42 +470,44 @@ router.get('/browse', async (req, res) => {
       return res.status(400).json({ error: `Адаптер "${supplier.adapter}" не підтримує живий перегляд каталогу` });
     }
 
-    const filters = {
-      id: req.query.id,
-      name: req.query.name,
-      vendorCode: req.query.vendor_code,
-      markTop: req.query.mark_top === 'true',
-      companyId: req.query.company_id,
-      categoryId: req.query.category_id || req.query.subcategory_id || undefined,
-      priceFrom: req.query.price_from,
-      priceTo: req.query.price_to,
-      availability: req.query.availability,
-      status: req.query.status,
-      startEditedAt: req.query.edited_from,
-      endEditedAt: req.query.edited_to,
-    };
+    const filters = parseBrowseFilters(req.query);
     const stockMin = req.query.stock_min !== undefined && req.query.stock_min !== '' ? Number(req.query.stock_min) : null;
 
-    const { items: rawItems, page: pageNum, total, hasMore } = await adapter.browseCatalog(supplier, filters, page || 1);
+    let page = Math.max(1, parseInt(req.query.start_page, 10) || 1);
+    const collected = [];
+    let pagesScanned = 0;
+    let exhausted = false;
 
-    // Already-in-our-catalogue check, scoped to just this page's ids.
-    const ids = rawItems.map((p) => String(p.supplierProductId));
-    let alreadyImportedIds = new Set();
-    if (ids.length) {
-      const { rows } = await pool.query(
-        `SELECT supplier_product_id FROM products WHERE supplier_id = $1 AND supplier_product_id = ANY($2::text[])`,
-        [supplier.id, ids]
-      );
-      alreadyImportedIds = new Set(rows.map((r) => r.supplier_product_id));
+    while (collected.length < TARGET_RESULTS && pagesScanned < MAX_SUPPLIER_PAGES) {
+      const { items: rawItems, hasMore } = await adapter.browseCatalog(supplier, filters, page);
+      pagesScanned += 1;
+
+      if (rawItems.length) {
+        const ids = rawItems.map((p) => String(p.supplierProductId));
+        const { rows } = await pool.query(
+          `SELECT supplier_product_id FROM products WHERE supplier_id = $1 AND supplier_product_id = ANY($2::text[])`,
+          [supplier.id, ids]
+        );
+        const alreadyImportedIds = new Set(rows.map((r) => r.supplier_product_id));
+
+        for (const p of rawItems) {
+          if (alreadyImportedIds.has(String(p.supplierProductId))) continue;
+          if (stockMin != null && !(Number.isFinite(p.stock) && p.stock >= stockMin)) continue;
+          collected.push(p);
+        }
+      }
+
+      page += 1;
+      if (!hasMore) { exhausted = true; break; }
     }
 
-    const items = rawItems.filter((p) => {
-      if (alreadyImportedIds.has(String(p.supplierProductId))) return false;
-      if (stockMin != null && !(Number.isFinite(p.stock) && p.stock >= stockMin)) return false;
-      return true;
+    res.json({
+      items: collected,
+      nextStartPage: exhausted ? null : page,
+      exhausted,
+      capped: !exhausted && pagesScanned >= MAX_SUPPLIER_PAGES,
+      pagesScanned,
     });
-
-    res.json({ items, page: pageNum, total, hasMore });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || 'Failed to browse catalogue' });
