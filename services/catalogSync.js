@@ -281,29 +281,32 @@ async function syncSupplier(supplier) {
 }
 
 // Lightweight refresh for manual_selection suppliers: updates price/stock/
-// availability on products we ALREADY imported, and does so by asking the
-// adapter to filter server-side (options.editedSince) so we only receive
-// what actually changed recently — never the whole remote catalogue.
+// availability on products we ALREADY imported — and ONLY those, looked up
+// ONE BY ONE by their own Hubber id (adapter.browseCatalog's `id` filter,
+// limit=1 — an exact-match lookup, not a scan). Bounded strictly by how
+// many products you've actually imported (3 imported = 3 requests), never
+// by the size of Hubber's remote catalogue.
 //
-// Deliberately different from syncSupplier in three ways:
-//   1. editedSince bounds the pull to "changed since last look" (defaults
-//      to 7 days back the very first time).
-//   2. Any product in the returned batches that we DON'T already have is
-//      dropped before it reaches the database — discovering new products
-//      is the live "Огляд каталогу" screen's job, not an automatic sync's.
-//   3. Nothing gets marked unavailable for "not seen this round" — a
-//      filtered delta only ever shows a slice of the catalogue, so absence
-//      from it says nothing about whether a product still exists.
+// This replaced an earlier version that called fetchCatalog with an
+// editedSince filter — which still asked Hubber's /product/cursor with
+// catalog:'all', i.e. their ENTIRE marketplace-wide pool across every
+// supplier on the platform, not just yours, with view=full on top. Only
+// the date range was ever filtered, and that filter's exact param format
+// was a best guess against Hubber's docs; if Hubber silently ignored it,
+// that request was effectively "page through everything Hubber has,
+// scanning attributes and photos for every item" — easily enough to sit
+// past a 30s timeout regardless of how few products you'd imported
+// yourself. Per-id lookups have no such blind spot: each one only ever
+// asks about a single, specific, already-known product.
 async function refreshManualSelectionSupplier(supplier) {
   const adapter = getAdapter(supplier);
-  if (!adapter.capabilities?.catalog) {
-    throw new Error(`Адаптер "${supplier.adapter}" не вміє віддавати каталог`);
+  if (typeof adapter.browseCatalog !== 'function') {
+    throw new Error(`Адаптер "${supplier.adapter}" не підтримує адресне оновлення за id — потрібен повний імпорт каталогу, що суперечить ручному відбору`);
   }
 
   const syncStartedAt = new Date();
   const client = await pool.connect();
   let imported = 0;
-  let skippedNew = 0;
 
   await pool.query(
     `UPDATE suppliers SET last_sync_status = 'running', sync_progress_current = 0, sync_progress_total = NULL WHERE id = $1`,
@@ -311,27 +314,48 @@ async function refreshManualSelectionSupplier(supplier) {
   );
 
   try {
-    const editedSince = supplier.last_sync_at || new Date(Date.now() - 7 * 24 * 3600 * 1000);
-
-    await adapter.fetchCatalog(
-      supplier,
-      async (batch) => {
-        const ids = batch.map((p) => String(p.supplierProductId));
-        const { rows: known } = await client.query(
-          `SELECT supplier_product_id FROM products WHERE supplier_id = $1 AND supplier_product_id = ANY($2::text[])`,
-          [supplier.id, ids]
-        );
-        const knownIds = new Set(known.rows ? known.rows.map((r) => r.supplier_product_id) : known.map((r) => r.supplier_product_id));
-        const alreadyImported = batch.filter((p) => knownIds.has(String(p.supplierProductId)));
-        skippedNew += batch.length - alreadyImported.length;
-        if (alreadyImported.length) {
-          await upsertBatch(client, supplier, alreadyImported, syncStartedAt);
-          imported += alreadyImported.length;
-        }
-        await pool.query('UPDATE suppliers SET sync_progress_current = $2 WHERE id = $1', [supplier.id, imported]);
-      },
-      { editedSince }
+    const { rows: existing } = await client.query(
+      `SELECT supplier_product_id FROM products WHERE supplier_id = $1`,
+      [supplier.id]
     );
+    const knownIds = existing.map((r) => r.supplier_product_id);
+
+    if (!knownIds.length) {
+      await client.query(
+        `UPDATE suppliers SET last_sync_at = now(), last_sync_status = 'ok', last_sync_message = $2 WHERE id = $1`,
+        [supplier.id, 'Немає раніше доданих товарів — оновлювати нічого. Додайте товари через «Товари» → «Огляд каталогу».']
+      );
+      return { supplier: supplier.name, imported: 0, deactivated: 0 };
+    }
+
+    // A handful of parallel lookups at a time — fast for the realistic
+    // case (dozens to a few hundred imported products) without firing
+    // them all at once and risking Hubber's own rate limits.
+    const CONCURRENCY = 5;
+    let notFound = 0;
+
+    for (let i = 0; i < knownIds.length; i += CONCURRENCY) {
+      const chunk = knownIds.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(
+        chunk.map(async (pid) => {
+          try {
+            const { items } = await adapter.browseCatalog(supplier, { id: pid }, 1, 1);
+            return items[0] || null;
+          } catch (err) {
+            console.warn(`[sync] ${supplier.name}: lookup failed for id=${pid}: ${err.message}`);
+            return null;
+          }
+        })
+      );
+
+      const found = results.filter(Boolean);
+      notFound += results.length - found.length;
+      if (found.length) {
+        await upsertBatch(client, supplier, found, syncStartedAt);
+        imported += found.length;
+      }
+      await pool.query('UPDATE suppliers SET sync_progress_current = $2, sync_progress_total = $3 WHERE id = $1', [supplier.id, i + chunk.length, knownIds.length]);
+    }
 
     await client.query(
       `UPDATE suppliers
@@ -340,9 +364,9 @@ async function refreshManualSelectionSupplier(supplier) {
         WHERE id = $1`,
       [
         supplier.id,
-        `Оновлено ${imported} раніше доданих товарів (лише зміни з ${editedSince.toISOString().slice(0, 10)}). ` +
-          `Нові товари постачальника сюди НЕ підвантажуються — додайте їх через «Товари» → «Огляд каталогу».` +
-          (skippedNew ? ` Пропущено ${skippedNew} нових/невідомих товарів.` : ''),
+        `Оновлено ${imported} із ${knownIds.length} раніше доданих товарів.` +
+          (notFound ? ` ${notFound} більше не знайдено у Hubber (могли зняти з продажу).` : '') +
+          ` Нові товари постачальника сюди НЕ підвантажуються — додайте їх через «Товари» → «Огляд каталогу».`,
       ]
     );
 
