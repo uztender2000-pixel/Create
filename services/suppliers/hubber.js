@@ -424,10 +424,13 @@ function toHubberDateTime(value) {
 //   status        — 4 | 7 (Hubber's moderation status_id)
 //   startEditedAt / endEditedAt — Date | ISO string
 // page: 1-based page number (Hubber's own "page" param), defaults to 1.
+// limit: page size (1-100), defaults to 50. Pass 1 for a cheap "does
+// anything match at all" existence check (see the category-filter-options
+// endpoint in routes/adminProducts.js) without pulling a full page.
 // ---------------------------------------------------------------------
-async function browseCatalog(supplier, filters = {}, page = 1) {
+async function browseCatalog(supplier, filters = {}, page = 1, limit = 50) {
   const categoryMap = await fetchCategoryMap(supplier);
-  const pageLimit = 50;
+  const pageLimit = Math.max(1, Math.min(100, parseInt(limit, 10) || 50));
 
   const params = {
     page: Math.max(1, parseInt(page, 10) || 1),
