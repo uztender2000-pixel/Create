@@ -55,10 +55,25 @@ router.get('/', async (req, res) => {
     // shop_category_id filters by the admin's own category tree (see
     // routes/adminCategories.js) rather than the raw supplier category —
     // this is what lets manually-curated subcategories appear as normal
-    // storefront navigation.
+    // storefront navigation. Selecting a PARENT category also includes
+    // every product filed under any of its subcategories (recursively),
+    // so picking a top-level category on the storefront behaves the way
+    // shoppers expect ("everything in Electronics", not "only products
+    // filed on Electronics itself with nothing in its subcategories").
     if (shop_category_id) {
       params.push(shop_category_id);
-      conditions.push(`EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id = p.id AND pc.category_id = $${params.length})`);
+      conditions.push(`EXISTS (
+        SELECT 1 FROM product_categories pc
+        WHERE pc.product_id = p.id
+          AND pc.category_id IN (
+            WITH RECURSIVE branch AS (
+              SELECT id FROM categories WHERE id = $${params.length}
+              UNION ALL
+              SELECT c.id FROM categories c JOIN branch ON c.parent_id = branch.id
+            )
+            SELECT id FROM branch
+          )
+      )`);
     }
     if (q && q.trim()) {
       params.push(`%${q.trim()}%`);
@@ -186,23 +201,39 @@ router.get('/meta/categories', async (req, res) => {
 
 // GET /api/products/meta/shop-categories — the admin's own category tree
 // (see routes/adminCategories.js), each with how many products currently
-// on sale sit in it. Used for storefront navigation alongside/instead of
-// the raw supplier sections above.
+// on sale sit in it (or in any of its subcategories). A category with
+// zero products anywhere in its branch is left out entirely — an empty
+// category is just noise in storefront navigation.
 router.get('/meta/shop-categories', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT c.id, c.parent_id, c.name, c.slug, c.sort_order,
-              COALESCE(pc.count, 0)::int AS count
+      `WITH RECURSIVE direct_counts AS (
+         SELECT pc.category_id, COUNT(*)::int AS cnt
+           FROM product_categories pc
+           JOIN products p ON p.id = pc.product_id
+           JOIN suppliers s ON s.id = p.supplier_id
+          WHERE p.available = true AND s.active = true
+            AND (s.manual_selection = false OR p.included = true)
+          GROUP BY pc.category_id
+       ),
+       -- (ancestor_id, self_or_descendant_id) for every category, itself included —
+       -- lets a parent's total tally add up everything under it, any number of levels deep.
+       branch AS (
+         SELECT id AS ancestor_id, id AS node_id FROM categories
+         UNION ALL
+         SELECT b.ancestor_id, c.id
+           FROM branch b
+           JOIN categories c ON c.parent_id = b.node_id
+       )
+       SELECT c.id, c.parent_id, c.name, c.slug, c.sort_order,
+              COALESCE(dc.cnt, 0)::int AS count,
+              COALESCE(SUM(bdc.cnt), 0)::int AS total_count
          FROM categories c
-         LEFT JOIN (
-           SELECT pc.category_id, COUNT(*)::int AS count
-             FROM product_categories pc
-             JOIN products p ON p.id = pc.product_id
-             JOIN suppliers s ON s.id = p.supplier_id
-            WHERE p.available = true AND s.active = true
-              AND (s.manual_selection = false OR p.included = true)
-            GROUP BY pc.category_id
-         ) pc ON pc.category_id = c.id
+         LEFT JOIN direct_counts dc ON dc.category_id = c.id
+         LEFT JOIN branch b ON b.ancestor_id = c.id
+         LEFT JOIN direct_counts bdc ON bdc.category_id = b.node_id
+        GROUP BY c.id, c.parent_id, c.name, c.slug, c.sort_order, dc.cnt
+       HAVING COALESCE(SUM(bdc.cnt), 0) > 0
         ORDER BY c.parent_id NULLS FIRST, c.sort_order, c.name`
     );
     res.json(rows);

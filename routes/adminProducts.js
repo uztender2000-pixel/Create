@@ -147,31 +147,44 @@ router.get('/', async (req, res) => {
 // actually present for this supplier's imported products, to populate the
 // filter dropdowns (brands, raw categories, Hubber sub-suppliers, statuses)
 // without hard-coding anything adapter-specific in the frontend.
+// GET /api/admin/products/filter-options?supplier_id=...&(same filters as GET /)
+// The dropdown options are "active": each facet (brand, category, status,
+// Hubber sub-supplier) is computed with every OTHER currently-applied
+// filter still in effect (but not its own) — so picking status "Промодеро-
+// ваний" immediately narrows the category dropdown to only categories that
+// actually contain a moderated product, picking a stock threshold narrows
+// brands to ones that still have matching stock, and so on. Without this,
+// the panel would happily let you pick a combination with zero results.
 router.get('/filter-options', async (req, res) => {
   try {
     const { supplier_id } = req.query;
-    if (!supplier_id) return res.status(400).json({ error: 'supplier_id обов\'язковий' });
+    if (!supplier_id) return res.status(400).json({ error: "supplier_id обов'язковий" });
+
+    const brandsQ = buildFacetWhere(req.query, 'vendor');
+    const categoriesQ = buildFacetWhere(req.query, 'category_id');
+    const statusesQ = buildFacetWhere(req.query, 'status_id');
+    const hubberQ = buildFacetWhere(req.query, 'hubber_supplier_id');
 
     const [brands, categories, statuses, hubberSuppliers] = await Promise.all([
       pool.query(
-        `SELECT vendor AS value, COUNT(*)::int AS count FROM products
-          WHERE supplier_id = $1 AND vendor IS NOT NULL AND vendor <> ''
-          GROUP BY vendor ORDER BY count DESC LIMIT 500`, [supplier_id]),
+        `SELECT vendor AS value, COUNT(*)::int AS count FROM products p
+          WHERE ${brandsQ.where} AND vendor IS NOT NULL AND vendor <> ''
+          GROUP BY vendor ORDER BY count DESC LIMIT 500`, brandsQ.params),
       pool.query(
-        `SELECT category_id AS id, category_name AS name, COUNT(*)::int AS count FROM products
-          WHERE supplier_id = $1 AND category_id IS NOT NULL
-          GROUP BY category_id, category_name ORDER BY name ASC LIMIT 1000`, [supplier_id]),
+        `SELECT category_id AS id, category_name AS name, COUNT(*)::int AS count FROM products p
+          WHERE ${categoriesQ.where} AND category_id IS NOT NULL
+          GROUP BY category_id, category_name ORDER BY name ASC LIMIT 1000`, categoriesQ.params),
       pool.query(
-        `SELECT raw_meta->>'statusId' AS id, raw_meta->>'status' AS name, COUNT(*)::int AS count FROM products
-          WHERE supplier_id = $1 AND raw_meta ? 'statusId' AND raw_meta->>'statusId' IS NOT NULL
-          GROUP BY raw_meta->>'statusId', raw_meta->>'status' ORDER BY count DESC`, [supplier_id]),
+        `SELECT raw_meta->>'statusId' AS id, raw_meta->>'status' AS name, COUNT(*)::int AS count FROM products p
+          WHERE ${statusesQ.where} AND raw_meta ? 'statusId' AND raw_meta->>'statusId' IS NOT NULL
+          GROUP BY raw_meta->>'statusId', raw_meta->>'status' ORDER BY count DESC`, statusesQ.params),
       pool.query(
         `SELECT raw_meta->>'hubberSupplierId' AS id, raw_meta->>'hubberSupplierName' AS name,
                 MAX((raw_meta->>'hubberSupplierRating')::numeric) AS rating, COUNT(*)::int AS count
-           FROM products
-          WHERE supplier_id = $1 AND raw_meta ? 'hubberSupplierId' AND raw_meta->>'hubberSupplierId' IS NOT NULL
+           FROM products p
+          WHERE ${hubberQ.where} AND raw_meta ? 'hubberSupplierId' AND raw_meta->>'hubberSupplierId' IS NOT NULL
           GROUP BY raw_meta->>'hubberSupplierId', raw_meta->>'hubberSupplierName'
-          ORDER BY count DESC LIMIT 1000`, [supplier_id]),
+          ORDER BY count DESC LIMIT 1000`, hubberQ.params),
     ]);
 
     res.json({
@@ -206,7 +219,7 @@ router.patch('/bulk-include', async (req, res) => {
     }
 
     if (filter && filter.supplier_id) {
-      const { where, params } = buildFilterWhere(filter);
+      const { where, params } = buildFacetWhere(filter);
       const { rowCount } = await pool.query(
         `UPDATE products p SET included = $${params.length + 1}, updated_at = now() WHERE ${where}`,
         [...params, included]
@@ -273,26 +286,49 @@ router.patch('/assign-categories', async (req, res) => {
   }
 });
 
-// Shared WHERE-builder used by bulk-include's `filter` mode — same fields
-// as GET / above, kept in one place so the two never drift apart.
-function buildFilterWhere(f) {
+// Shared WHERE-builder for the products list, the "active" filter-options
+// facets, and bulk-include's `filter` mode — one place, so they can never
+// silently drift apart. `excludeField`, when given, skips that one field's
+// own condition (used so a facet's dropdown reflects every filter EXCEPT
+// itself — see /filter-options above).
+function buildFacetWhere(f, excludeField) {
   const conditions = ['p.supplier_id = $1'];
   const params = [f.supplier_id];
-  const add = (sql, value) => { params.push(value); conditions.push(sql.replace('?', `$${params.length}`)); };
+  const add = (field, sql, value) => {
+    if (field === excludeField) return;
+    params.push(value);
+    conditions.push(sql.replace('?', `$${params.length}`));
+  };
 
-  if (f.included === 'true') conditions.push('p.included = true');
-  else if (f.included === 'false') conditions.push('p.included = false');
-  if (f.q && f.q.trim()) add('p.name ILIKE ?', `%${f.q.trim()}%`);
-  if (f.vendor_code && f.vendor_code.trim()) add('p.vendor_code ILIKE ?', `%${f.vendor_code.trim()}%`);
-  if (f.category_id) add('p.category_id = ?', f.category_id);
-  if (f.vendor) add('p.vendor = ?', f.vendor);
-  if (f.price_from) add('p.price >= ?', Number(f.price_from));
-  if (f.price_to) add('p.price <= ?', Number(f.price_to));
-  if (f.availability === 'in_stock') conditions.push('p.available = true');
-  else if (f.availability === 'out_of_stock') conditions.push('p.available = false');
-  if (f.status_id) add("p.raw_meta->>'statusId' = ?", String(f.status_id));
-  if (f.is_top === 'true') conditions.push("(p.raw_meta->>'isTop')::boolean = true");
-  if (f.hubber_supplier_id) add("p.raw_meta->>'hubberSupplierId' = ?", String(f.hubber_supplier_id));
+  if (excludeField !== 'included') {
+    if (f.included === 'true') conditions.push('p.included = true');
+    else if (f.included === 'false') conditions.push('p.included = false');
+  }
+  if (f.q && f.q.trim()) add('q', 'p.name ILIKE ?', `%${f.q.trim()}%`);
+  if (f.vendor_code && f.vendor_code.trim()) add('vendor_code', 'p.vendor_code ILIKE ?', `%${f.vendor_code.trim()}%`);
+  if (f.supplier_product_id && f.supplier_product_id.trim()) add('supplier_product_id', 'p.supplier_product_id ILIKE ?', `%${f.supplier_product_id.trim()}%`);
+  if (f.category_id) add('category_id', 'p.category_id = ?', f.category_id);
+  if (f.vendor) add('vendor', 'p.vendor = ?', f.vendor);
+  if (f.price_from) add('price_from', 'p.price >= ?', Number(f.price_from));
+  if (f.price_to) add('price_to', 'p.price <= ?', Number(f.price_to));
+  if (excludeField !== 'availability') {
+    if (f.availability === 'in_stock') conditions.push('p.available = true');
+    else if (f.availability === 'out_of_stock') conditions.push('p.available = false');
+  }
+  if (excludeField !== 'stock_min' && f.stock_min) add('stock_min', 'p.stock >= ?', Number(f.stock_min));
+  if (f.status_id) add('status_id', "p.raw_meta->>'statusId' = ?", String(f.status_id));
+  if (excludeField !== 'is_top') {
+    if (f.is_top === 'true') conditions.push("(p.raw_meta->>'isTop')::boolean = true");
+    else if (f.is_top === 'false') conditions.push("COALESCE((p.raw_meta->>'isTop')::boolean, false) = false");
+  }
+  if (f.hubber_supplier_id) add('hubber_supplier_id', "p.raw_meta->>'hubberSupplierId' = ?", String(f.hubber_supplier_id));
+  if (excludeField !== 'shop_category_id') {
+    if (f.shop_category_id === 'unassigned') {
+      conditions.push('NOT EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id = p.id)');
+    } else if (f.shop_category_id) {
+      add('shop_category_id', 'EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id = p.id AND pc.category_id = ?)', f.shop_category_id);
+    }
+  }
 
   return { where: conditions.join(' AND '), params };
 }
