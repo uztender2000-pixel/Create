@@ -407,27 +407,35 @@ router.get('/browse', async (req, res) => {
     const stockMin = req.query.stock_min !== undefined && req.query.stock_min !== '' ? Number(req.query.stock_min) : null;
     const startPage = Math.max(1, parseInt(req.query.start_page, 10) || 1);
 
-    // Pages within one call are fetched IN PARALLEL, not one-after-another.
-    // They're independent requests (page N doesn't need page N-1's result
-    // to be asked for), so there's no reason to pay for 5 sequential
-    // Hubber round-trips (which is also why this used to feel so slow —
-    // with hubber.js's own timeout+retry, one merely-slow page could cost
-    // up to ~60s on its own, and every page before it had to finish first
-    // even though none of them were actually waiting on each other).
-    // Fired in order and speculatively past the true end where needed;
-    // any pages fetched after the real last page are simply discarded
-    // below — a handful of wasted calls right at the end of a crawl is a
-    // fair trade for finishing every other batch ~5x faster.
+    // Pages within one call are fetched IN PARALLEL, not one-after-another
+    // — they're independent requests, so there's no reason to pay for 8
+    // sequential Hubber round-trips. allSettled (not all) on purpose: one
+    // page having a bad moment must not throw away a whole batch of
+    // otherwise-successful pages, which is exactly what happened when this
+    // used Promise.all — a single flaky page failed the entire call.
+    //
+    // Processed strictly in page order: everything up to and including the
+    // first FAILED page is kept; nothing after it is used, and that same
+    // failed page number becomes next call's start_page so it gets a fresh
+    // try next round instead of silently skipping whatever was on it.
     const pageNumbers = Array.from({ length: MAX_PAGES_PER_CALL }, (_, i) => startPage + i);
-    const pageResults = await Promise.all(
+    const settled = await Promise.allSettled(
       pageNumbers.map((p) => adapter.browseCatalog(supplier, filters, p, CHUNK_PAGE_SIZE))
     );
 
     const collected = [];
     let pagesScanned = 0;
     let exhausted = false;
+    let hitFailure = false;
 
-    for (const { items: rawItems, hasMore } of pageResults) {
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        console.warn(`[browse] ${supplier.name}: page ${startPage + pagesScanned} failed: ${result.reason?.message}`);
+        hitFailure = true;
+        break; // don't process anything past a failed page — order matters for nextStartPage
+      }
+
+      const { items: rawItems, hasMore } = result.value;
       pagesScanned += 1;
 
       if (rawItems.length) {
@@ -451,13 +459,14 @@ router.get('/browse', async (req, res) => {
       if (!hasMore) { exhausted = true; break; } // stop accumulating at the first page that says "that's everything" — anything fetched after it in this same batch is stale/irrelevant and gets dropped
     }
 
-    const page = startPage + pagesScanned; // next call's start_page, if not exhausted
+    const page = startPage + pagesScanned; // next call's start_page — naturally lands back on the failed page itself when hitFailure is true, so it gets retried rather than skipped
 
     res.json({
       items: collected,
       nextStartPage: exhausted ? null : page,
       exhausted,
       pagesScanned,
+      pageFailed: hitFailure, // this batch stopped early because one page errored out (network/timeout) — not fatal, the frontend just tries that same page again next call
     });
   } catch (err) {
     console.error(err);
