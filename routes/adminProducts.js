@@ -384,7 +384,7 @@ function parseBrowseFilters(q) {
 // each raw page comes back, so it's already baked into the list rather
 // than something the admin has to also remember to apply afterwards.
 const CHUNK_PAGE_SIZE = 100;      // Hubber's documented max per page
-const MAX_PAGES_PER_CALL = 5;     // ≈500 raw products scanned per HTTP round-trip, worst case — kept small so one slow Hubber response can't stack into a request that times out on OUR side too
+const MAX_PAGES_PER_CALL = 8;     // fetched in PARALLEL (see below) — wall-clock cost is now the slowest single page, not the sum of all of them, so this can be higher than it could when they ran one after another
 
 router.get('/browse', async (req, res) => {
   try {
@@ -405,13 +405,29 @@ router.get('/browse', async (req, res) => {
 
     const filters = parseBrowseFilters(req.query);
     const stockMin = req.query.stock_min !== undefined && req.query.stock_min !== '' ? Number(req.query.stock_min) : null;
-    let page = Math.max(1, parseInt(req.query.start_page, 10) || 1);
+    const startPage = Math.max(1, parseInt(req.query.start_page, 10) || 1);
+
+    // Pages within one call are fetched IN PARALLEL, not one-after-another.
+    // They're independent requests (page N doesn't need page N-1's result
+    // to be asked for), so there's no reason to pay for 5 sequential
+    // Hubber round-trips (which is also why this used to feel so slow —
+    // with hubber.js's own timeout+retry, one merely-slow page could cost
+    // up to ~60s on its own, and every page before it had to finish first
+    // even though none of them were actually waiting on each other).
+    // Fired in order and speculatively past the true end where needed;
+    // any pages fetched after the real last page are simply discarded
+    // below — a handful of wasted calls right at the end of a crawl is a
+    // fair trade for finishing every other batch ~5x faster.
+    const pageNumbers = Array.from({ length: MAX_PAGES_PER_CALL }, (_, i) => startPage + i);
+    const pageResults = await Promise.all(
+      pageNumbers.map((p) => adapter.browseCatalog(supplier, filters, p, CHUNK_PAGE_SIZE))
+    );
+
     const collected = [];
     let pagesScanned = 0;
     let exhausted = false;
 
-    while (pagesScanned < MAX_PAGES_PER_CALL) {
-      const { items: rawItems, hasMore } = await adapter.browseCatalog(supplier, filters, page, CHUNK_PAGE_SIZE);
+    for (const { items: rawItems, hasMore } of pageResults) {
       pagesScanned += 1;
 
       if (rawItems.length) {
@@ -432,9 +448,10 @@ router.get('/browse', async (req, res) => {
         }
       }
 
-      page += 1;
-      if (!hasMore) { exhausted = true; break; }
+      if (!hasMore) { exhausted = true; break; } // stop accumulating at the first page that says "that's everything" — anything fetched after it in this same batch is stale/irrelevant and gets dropped
     }
+
+    const page = startPage + pagesScanned; // next call's start_page, if not exhausted
 
     res.json({
       items: collected,
