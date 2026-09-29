@@ -360,6 +360,22 @@ async function initSchema() {
       PRIMARY KEY (product_id, category_id)
     );
 
+    -- ---------------------------------------------------------------------
+    -- Customer browsing history: the last 50 distinct products each
+    -- logged-in customer opened. One row per (user, product) — viewing
+    -- something again just refreshes viewed_at — and the API trims each
+    -- user back to their 50 newest after every write. Feeds both the
+    -- "Переглянуті" tab of the customer cabinet and the personalised
+    -- homepage recommendations (see routes/products.js /recommended).
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS product_views (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      product_id BIGINT  NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      viewed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (user_id, product_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_views_user_time ON product_views (user_id, viewed_at DESC);
+
     CREATE INDEX IF NOT EXISTS idx_products_supplier ON products (supplier_id);
     CREATE INDEX IF NOT EXISTS idx_products_available ON products (available);
     CREATE INDEX IF NOT EXISTS idx_products_section ON products (section);
