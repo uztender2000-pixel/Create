@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAdminAuth, requirePermission } = require('../middleware/adminAuth');
+const { optionalAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -240,6 +241,102 @@ router.get('/meta/shop-categories', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load shop categories' });
+  }
+});
+
+// GET /api/products/recommended?limit=10&viewed=12,7,3
+// The homepage "for you" list, built from what this shopper has actually
+// bought and looked at. Works for both kinds of visitor:
+//   - logged in (Bearer token): purchases (from orders) + saved browsing
+//     history (product_views)
+//   - guest: the `viewed` query param — the ids from the browser's own
+//     local history, newest first — so a first-time visitor's list starts
+//     adapting after the very first product they open
+// How it picks: every signal product votes for its category — its own
+// site categories where it has any, otherwise its supplier section — with
+// purchases counting 3x a view and more recent views counting more than
+// old ones. The top categories each get a share of the slots proportional
+// to their weight; anything already bought or viewed is left out (the
+// cabinet's "Переглянуті" tab already shows those), and any slots still
+// empty are filled with random products so the list is always full. No
+// history at all → the plain random list, `personalized: false`.
+router.get('/recommended', optionalAuth, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 30);
+    const VISIBLE = `p.available = true AND s.active = true AND (s.manual_selection = false OR p.included = true)`;
+    const COLS = `p.id, p.name, p.retail_price, p.picture_url, p.vendor`;
+
+    // ---- collect signals: [{ id, weight }] ----
+    const signals = new Map(); // product id -> weight
+    const bump = (id, w) => signals.set(String(id), (signals.get(String(id)) || 0) + w);
+    const purchased = new Set();
+
+    if (req.user) {
+      const { rows: bought } = await pool.query('SELECT DISTINCT product_id FROM orders WHERE user_id = $1 AND product_id IS NOT NULL', [req.user.id]);
+      bought.forEach((r) => { purchased.add(String(r.product_id)); bump(r.product_id, 3); });
+      const { rows: seen } = await pool.query('SELECT product_id FROM product_views WHERE user_id = $1 ORDER BY viewed_at DESC LIMIT 50', [req.user.id]);
+      seen.forEach((r, i) => bump(r.product_id, 1 + (seen.length - i) / seen.length));
+    } else if (req.query.viewed) {
+      const ids = String(req.query.viewed).split(',').filter((v) => /^\d+$/.test(v)).slice(0, 50);
+      ids.forEach((id, i) => bump(id, 1 + (ids.length - i) / ids.length));
+    }
+
+    const exclude = [...signals.keys()];
+    const picked = new Map(); // id -> row
+    let personalized = false;
+
+    if (signals.size) {
+      // ---- which categories do those products belong to? ----
+      const { rows: attrs } = await pool.query(
+        `SELECT p.id, p.section,
+                COALESCE((SELECT array_agg(pc.category_id) FROM product_categories pc WHERE pc.product_id = p.id), '{}') AS cats
+           FROM products p WHERE p.id = ANY($1::bigint[])`,
+        [exclude]
+      );
+      const keyWeight = new Map(); // 'cat:12' | 'sec:Назва' -> weight
+      for (const a of attrs) {
+        const w = signals.get(String(a.id)) || 0;
+        const keys = a.cats.length ? a.cats.map((c) => `cat:${c}`) : (a.section ? [`sec:${a.section}`] : []);
+        keys.forEach((k) => keyWeight.set(k, (keyWeight.get(k) || 0) + w / keys.length));
+      }
+
+      const top = [...keyWeight.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+      const totalW = top.reduce((sum, [, w]) => sum + w, 0);
+
+      for (const [key, w] of top) {
+        const quota = Math.max(1, Math.round(limit * (w / totalW)));
+        const cond = key.startsWith('cat:')
+          ? `EXISTS (SELECT 1 FROM product_categories pc WHERE pc.product_id = p.id AND pc.category_id = $2)`
+          : `p.section = $2`;
+        const { rows } = await pool.query(
+          `SELECT ${COLS} FROM products p JOIN suppliers s ON s.id = p.supplier_id
+            WHERE ${VISIBLE} AND p.id <> ALL($1::bigint[]) AND ${cond}
+            ORDER BY random() LIMIT ${quota}`,
+          [exclude, key.startsWith('cat:') ? Number(key.slice(4)) : key.slice(4)]
+        );
+        rows.forEach((r) => picked.set(String(r.id), r));
+      }
+      personalized = picked.size > 0;
+    }
+
+    // ---- top up with random products so the list is always full ----
+    if (picked.size < limit) {
+      const skip = [...new Set([...purchased, ...picked.keys()])];
+      const { rows } = await pool.query(
+        `SELECT ${COLS} FROM products p JOIN suppliers s ON s.id = p.supplier_id
+          WHERE ${VISIBLE} AND p.id <> ALL($1::bigint[])
+          ORDER BY random() LIMIT ${limit - picked.size}`,
+        [skip]
+      );
+      rows.forEach((r) => picked.set(String(r.id), r));
+    }
+
+    // shuffle so the personalised picks aren't grouped category by category
+    const products = [...picked.values()].slice(0, limit).sort(() => Math.random() - 0.5);
+    res.json({ products, personalized });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load recommendations' });
   }
 });
 
