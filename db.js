@@ -156,6 +156,34 @@ async function initSchema() {
     ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS sync_progress_current INTEGER DEFAULT 0;
     ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS sync_progress_total INTEGER;
     ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS manual_selection BOOLEAN NOT NULL DEFAULT false;
+    -- How this supplier's orders actually get fulfilled — this drives who
+    -- creates the receipt/TTN, who collects payment, and who's shown as
+    -- the "seller" on the product card:
+    --   'supplier_ships' — classic dropshipping. We forward the order;
+    --     the supplier ships it AND collects payment from the customer
+    --     directly, then remits our margin to us. The product card shows
+    --     the REAL supplier (or, for a marketplace-of-suppliers adapter
+    --     like Hubber, the specific underlying seller — see products.js)
+    --     as the seller, since legally/practically that's who the
+    --     customer is buying from.
+    --   'shop_ships' — we act as the seller of record: WE create the
+    --     receipt and TTN, WE collect payment from the customer, and
+    --     settle with the supplier separately (e.g. paying wholesale
+    --     cost after the fact). The product card shows OUR OWN shop as
+    --     the seller (see routes/config.js's shopName) — the customer
+    --     never needs to know who the underlying supplier is.
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS fulfillment_type TEXT NOT NULL DEFAULT 'supplier_ships';
+    ALTER TABLE suppliers DROP CONSTRAINT IF EXISTS suppliers_fulfillment_type_check;
+    ALTER TABLE suppliers ADD CONSTRAINT suppliers_fulfillment_type_check
+      CHECK (fulfillment_type IN ('supplier_ships', 'shop_ships'));
+    -- Which payment methods this supplier's orders can actually be paid
+    -- through — shown on the product card so a shopper knows before they
+    -- order. 'on_delivery' (pay the carrier on receipt) is the safe
+    -- default every supplier is assumed to support unless set otherwise.
+    ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payment_methods TEXT[] NOT NULL DEFAULT '{on_delivery}';
+    ALTER TABLE suppliers DROP CONSTRAINT IF EXISTS suppliers_payment_methods_check;
+    ALTER TABLE suppliers ADD CONSTRAINT suppliers_payment_methods_check
+      CHECK (payment_methods <@ ARRAY['prepaid', 'on_delivery']::text[]);
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_delivery_method TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city_ref TEXT;
