@@ -29,6 +29,10 @@ const webhooksMydropRouter = require('./routes/webhooksMydrop');
 
 const app = express();
 
+// Render стоїть за reverse-proxy: без цього всі клієнти мають одну IP-адресу
+// (адресу проксі), і rate limit спрацьовує одразу на всіх разом.
+app.set('trust proxy', 1);
+
 app.use(helmet({ contentSecurityPolicy: false }));
 
 const allowedOrigin = process.env.FRONTEND_ORIGIN;
@@ -43,6 +47,11 @@ app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/forgot-password', authLimiter);
 app.use('/api/auth/reset-password', authLimiter);
+
+// SMS коштують гроші — окремий жорсткий ліміт на відправку/перевірку кодів.
+const smsLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
+app.use('/api/auth/send-phone-code', smsLimiter);
+app.use('/api/auth/verify-phone', rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false }));
 
 app.get('/', (req, res) => res.json({ ok: true, service: 'OllShop backend' }));
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
