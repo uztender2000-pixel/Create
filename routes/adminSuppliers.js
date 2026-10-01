@@ -12,7 +12,7 @@ router.use(requireAdminAuth, requirePermission('settings'));
 const SAFE_COLUMNS = `
   s.id, s.code, s.name, s.adapter, s.feed_urls, s.api_url, s.api_login,
   s.config, s.markup_percent, s.auto_order, s.active, s.sort_order,
-  s.manual_selection,
+  s.manual_selection, s.fulfillment_type, s.payment_methods,
   s.last_sync_at, s.last_sync_status, s.last_sync_message, s.created_at,
   (s.api_key IS NOT NULL AND s.api_key <> '') AS has_api_key
 `;
@@ -59,23 +59,29 @@ router.post('/', async (req, res) => {
     const {
       code, name, adapter, feed_urls, api_url, api_key, api_login,
       config, markup_percent, auto_order, active, sort_order, manual_selection,
+      fulfillment_type, payment_methods,
     } = req.body;
 
     if (!code || !name) return res.status(400).json({ error: "code і name обов'язкові" });
+    if (fulfillment_type && !['supplier_ships', 'shop_ships'].includes(fulfillment_type)) {
+      return res.status(400).json({ error: "fulfillment_type має бути 'supplier_ships' або 'shop_ships'" });
+    }
 
     const { rows } = await pool.query(
       `INSERT INTO suppliers (code, name, adapter, feed_urls, api_url, api_key, api_login,
-                              config, markup_percent, auto_order, active, sort_order, manual_selection)
+                              config, markup_percent, auto_order, active, sort_order, manual_selection,
+                              fulfillment_type, payment_methods)
        VALUES ($1, $2, COALESCE($3::text, 'yml_feed'), COALESCE($4::text[], '{}'::text[]),
                $5::text, $6::text, $7::text,
                COALESCE($8::jsonb, '{}'::jsonb), COALESCE($9::numeric, 0),
                COALESCE($10::boolean, false), COALESCE($11::boolean, true), COALESCE($12::integer, 0),
-               COALESCE($13::boolean, false))
+               COALESCE($13::boolean, false),
+               COALESCE($14::text, 'supplier_ships'), COALESCE($15::text[], '{on_delivery}'::text[]))
        RETURNING id`,
       [
         code.trim(), name.trim(), adapter, feed_urls, api_url, api_key, api_login,
         config ? JSON.stringify(config) : null, markup_percent, auto_order, active, sort_order,
-        manual_selection,
+        manual_selection, fulfillment_type, payment_methods,
       ]
     );
 
@@ -95,7 +101,11 @@ router.patch('/:id', async (req, res) => {
     const {
       name, adapter, feed_urls, api_url, api_key, api_login,
       config, markup_percent, auto_order, active, sort_order, manual_selection,
+      fulfillment_type, payment_methods,
     } = req.body;
+    if (fulfillment_type && !['supplier_ships', 'shop_ships'].includes(fulfillment_type)) {
+      return res.status(400).json({ error: "fulfillment_type має бути 'supplier_ships' або 'shop_ships'" });
+    }
 
     const { rows } = await pool.query(
       `UPDATE suppliers SET
@@ -110,12 +120,14 @@ router.patch('/:id', async (req, res) => {
          auto_order        = COALESCE($10, auto_order),
          active            = COALESCE($11, active),
          sort_order        = COALESCE($12, sort_order),
-         manual_selection  = COALESCE($13, manual_selection)
+         manual_selection  = COALESCE($13, manual_selection),
+         fulfillment_type  = COALESCE($14, fulfillment_type),
+         payment_methods   = COALESCE($15, payment_methods)
        WHERE id = $1 RETURNING id`,
       [
         req.params.id, name, adapter, feed_urls, api_url, api_key, api_login,
         config ? JSON.stringify(config) : null, markup_percent, auto_order, active, sort_order,
-        manual_selection,
+        manual_selection, fulfillment_type, payment_methods,
       ]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
