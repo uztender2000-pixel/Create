@@ -11,6 +11,25 @@ const router = express.Router();
 // is special to the database.
 const UNCATEGORIZED = '__uncategorized__';
 
+// Our own shop's display name — the "seller" shown on a product card for
+// shop_ships suppliers (see suppliers.fulfillment_type below). Same value
+// routes/config.js hands the frontend, kept in one place so they can't drift.
+const SHOP_NAME = process.env.SHOP_NAME || 'В Хату.UA';
+
+// Who's actually selling this product, for the product card:
+//   - shop_ships supplier: WE are ("мій магазин") — we create the receipt/
+//     TTN and collect payment, so the customer is buying from us.
+//   - supplier_ships (classic dropship): the REAL supplier. For an
+//     aggregator adapter like Hubber, that's the specific underlying
+//     seller behind that one product (raw_meta.hubberSupplierName), since
+//     "Hubber" itself is just the API we buy through, not who's actually
+//     selling it — falls back to the supplier's own name when an adapter
+//     has no such per-product seller (an ordinary single-seller feed).
+function resolveSeller(row) {
+  if (row.fulfillment_type === 'shop_ships') return SHOP_NAME;
+  return row.raw_meta?.hubberSupplierName || row.supplier_name;
+}
+
 // Whitelist of sort options -> SQL ORDER BY clause. Never interpolate the
 // sort value directly into SQL — always go through this map.
 const SORT_OPTIONS = {
@@ -94,7 +113,9 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT p.id, p.name, p.description, p.retail_price, p.price, p.picture_url,
               p.vendor, p.category_id, p.category_name, p.section, p.stock,
+              p.raw_meta,
               s.code AS supplier_code, s.name AS supplier_name,
+              s.fulfillment_type, s.payment_methods,
               COALESCE(oc.order_count, 0) AS order_count
          FROM products p
          JOIN suppliers s ON s.id = p.supplier_id
@@ -108,8 +129,17 @@ router.get('/', async (req, res) => {
       dataParams
     );
 
+    // seller_name computed here (not in SQL) since it needs our own
+    // SHOP_NAME constant; raw_meta dropped afterwards — it was only
+    // fetched to pull hubberSupplierName out of it and isn't otherwise
+    // meant for public API consumers.
+    const products = rows.map(({ raw_meta, fulfillment_type, ...row }) => ({
+      ...row,
+      seller_name: resolveSeller({ raw_meta, fulfillment_type, supplier_name: row.supplier_name }),
+    }));
+
     res.json({
-      products: rows,
+      products,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       sort: sortKey,
     });
@@ -348,8 +378,8 @@ router.get('/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT p.id, p.name, p.description, p.retail_price, p.picture_url, p.pictures,
               p.vendor, p.vendor_code, p.params, p.category_id, p.category_name,
-              p.section, p.stock, p.available,
-              s.name AS supplier_name
+              p.section, p.stock, p.available, p.raw_meta,
+              s.name AS supplier_name, s.fulfillment_type, s.payment_methods
          FROM products p JOIN suppliers s ON s.id = p.supplier_id
         WHERE p.id = $1 AND s.active = true`,
       [req.params.id]
@@ -364,7 +394,10 @@ router.get('/:id', async (req, res) => {
       [req.params.id]
     );
 
-    res.json({ ...rows[0], shop_categories: cats });
+    const { raw_meta, fulfillment_type, ...product } = rows[0];
+    product.seller_name = resolveSeller({ raw_meta, fulfillment_type, supplier_name: product.supplier_name });
+
+    res.json({ ...product, shop_categories: cats });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load product' });
