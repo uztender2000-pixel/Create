@@ -23,13 +23,13 @@ function codeExpiry() {
 async function issuePhoneCode(userId, phone) {
   const code = generateCode();
   await pool.query('UPDATE users SET phone_code = $1, phone_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
-  await sendSms(phone, `OllShop: ваш код підтвердження телефону — ${code}`);
+  return sendSms(phone, `OllShop: ваш код підтвердження телефону — ${code}`);
 }
 
 async function issueEmailCode(userId, email) {
   const code = generateCode();
   await pool.query('UPDATE users SET email_code = $1, email_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
-  await sendEmail(email, 'Підтвердження email — OllShop', `Ваш код підтвердження email: ${code}\n\nКод дійсний 15 хвилин.`);
+  return sendEmail(email, 'Підтвердження email — OllShop', `Ваш код підтвердження email: ${code}\n\nКод дійсний 15 хвилин.`);
 }
 
 // POST /api/auth/register — { name, email, phone, password }. Phone is
@@ -123,7 +123,14 @@ router.post('/send-phone-code', requireAuth, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     if (rows[0].phone_verified) return res.json({ ok: true, alreadyVerified: true });
 
-    await issuePhoneCode(req.user.id, rows[0].phone);
+    const result = await issuePhoneCode(req.user.id, rows[0].phone);
+    if (!result.sent) {
+      return res.status(503).json({
+        error: result.reason === 'not_configured'
+          ? 'Надсилання SMS не налаштовано на сервері. Зверніться до адміністратора.'
+          : 'Не вдалося надіслати SMS. Спробуйте пізніше.',
+      });
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -158,7 +165,19 @@ router.post('/send-email-code', requireAuth, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     if (rows[0].email_verified) return res.json({ ok: true, alreadyVerified: true });
 
-    await issueEmailCode(req.user.id, rows[0].email);
+    const result = await issueEmailCode(req.user.id, rows[0].email);
+    if (!result.sent) {
+      // The code WAS generated and saved — verify-email will still work if
+      // someone finds it out of band — but no email actually went out, so
+      // telling the user "ok" here would just leave them staring at an
+      // inbox that's never going to get anything. SMTP_HOST/SMTP_USER/
+      // SMTP_PASS aren't set in this environment; see services/emailClient.js.
+      return res.status(503).json({
+        error: result.reason === 'not_configured'
+          ? 'Надсилання листів не налаштовано на сервері (SMTP). Зверніться до адміністратора.'
+          : 'Не вдалося надіслати лист. Спробуйте пізніше.',
+      });
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
