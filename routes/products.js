@@ -42,47 +42,92 @@ const SORT_OPTIONS = {
   random: 'RANDOM()', // used for the homepage's "10 random products" view
 };
 
-// GET /api/products — list available products, paginated and sortable.
-// ?featured=true        -> just your test finalists
-// ?section=...          -> filter by top-level section
-// ?category_id=...      -> filter by specific category within a section
-// ?supplier=code        -> only one supplier's products
-// ?q=...                -> search by name or article/vendor_code
-// ?sort=... ?page=1&limit=24
-router.get('/', async (req, res) => {
-  try {
-    const { featured, section, category_id, q, supplier, shop_category_id } = req.query;
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
-    const offset = (page - 1) * limit;
-    const sortKey = SORT_OPTIONS[req.query.sort] ? req.query.sort : 'newest';
-    const orderBy = SORT_OPTIONS[sortKey];
+// ---------------------------------------------------------------------------
+// Фільтри за характеристиками (products.params — JSONB-об'єкт { назва: значення }).
+//
+// Клієнт передає вибір одним параметром:
+//   ?filters={"колір":["чорний","білий"],"__vendor":["nike"]}&price_min=100&price_max=900
+// Ключі й значення тут — у «нормалізованому» вигляді (lower + btrim), саме такими
+// їх віддає /meta/filters, тому JS-ом їх повторно НЕ нормалізуємо: порівняння
+// відбувається тим самим SQL-виразом, яким вони були утворені.
+// "__vendor" — службовий ключ для бренду (колонка products.vendor).
+// ---------------------------------------------------------------------------
+const VENDOR_KEY = '__vendor';
 
-    // Only sell what's available AND from a supplier that's switched on —
-    // deactivating a supplier now hides its whole catalogue in one click.
-    // For a manual_selection supplier (catalogue updates itself via an API,
-    // e.g. Hubber/MyDrop/TradeEvo) a product also has to be admin-included;
-    // for an ordinary feed supplier `included` is always true and this
-    // condition is a no-op.
-    const conditions = ['p.available = true', 's.active = true', '(s.manual_selection = false OR p.included = true)'];
-    const params = [];
+// params може бути NULL або не об'єктом — jsonb_each_text на таких падає, тож підстраховуємось.
+const POBJ = `(CASE WHEN jsonb_typeof(p.params) = 'object' THEN p.params ELSE '{}'::jsonb END)`;
 
-    if (featured === 'true') conditions.push('p.featured = true');
-    if (section === UNCATEGORIZED) conditions.push('p.section IS NULL');
-    else if (section) { params.push(section); conditions.push(`p.section = $${params.length}`); }
-    if (category_id) { params.push(category_id); conditions.push(`p.category_id = $${params.length}`); }
-    if (supplier) { params.push(supplier); conditions.push(`s.code = $${params.length}`); }
-    // shop_category_id filters by the admin's own category tree (see
-    // routes/adminCategories.js) rather than the raw supplier category —
-    // this is what lets manually-curated subcategories appear as normal
-    // storefront navigation. Selecting a PARENT category also includes
-    // every product filed under any of its subcategories (recursively),
-    // so picking a top-level category on the storefront behaves the way
-    // shoppers expect ("everything in Electronics", not "only products
-    // filed on Electronics itself with nothing in its subcategories").
-    if (shop_category_id) {
-      params.push(shop_category_id);
-      conditions.push(`EXISTS (
+function parseFilters(raw) {
+  const out = {};
+  if (!raw) return out;
+  let obj;
+  try { obj = JSON.parse(raw); } catch { return out; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return out;
+  for (const [key, vals] of Object.entries(obj).slice(0, 30)) {
+    if (!key || key.length > 120 || !Array.isArray(vals)) continue;
+    const clean = [...new Set(vals.filter((v) => typeof v === 'string' && v.length > 0 && v.length <= 120))].slice(0, 100);
+    if (clean.length) out[key] = clean;
+  }
+  return out;
+}
+
+function parsePrice(v) {
+  const n = Number(v);
+  return v !== undefined && v !== '' && Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+// Умови для вибраних фільтрів і ціни. `exclude` — ключ, який не враховуємо
+// (щоб у групі вже вибраних значень показувати лічильники інших значень цієї ж групи).
+function filterConditions(filters, price, params, exclude) {
+  const conds = [];
+  for (const [key, vals] of Object.entries(filters)) {
+    if (key === exclude) continue;
+    if (key === VENDOR_KEY) {
+      params.push(vals);
+      conds.push(`lower(btrim(p.vendor)) = ANY($${params.length}::text[])`);
+    } else {
+      params.push(key);
+      const kIdx = params.length;
+      params.push(vals);
+      conds.push(`EXISTS (
+        SELECT 1 FROM jsonb_each_text(${POBJ}) fe
+        WHERE lower(btrim(fe.key)) = $${kIdx} AND lower(btrim(fe.value)) = ANY($${params.length}::text[])
+      )`);
+    }
+  }
+  if (price.min !== null) { params.push(price.min); conds.push(`p.retail_price >= $${params.length}`); }
+  if (price.max !== null) { params.push(price.max); conds.push(`p.retail_price <= $${params.length}`); }
+  return conds;
+}
+
+// Базові умови видимості + категорія/розділ/пошук — те, що не залежить від фільтрів.
+function baseConditions(query) {
+  const { featured, section, category_id, q, supplier, shop_category_id } = query;
+  // Only sell what's available AND from a supplier that's switched on —
+  // deactivating a supplier now hides its whole catalogue in one click.
+  // For a manual_selection supplier (catalogue updates itself via an API,
+  // e.g. Hubber/MyDrop/TradeEvo) a product also has to be admin-included;
+  // for an ordinary feed supplier `included` is always true and this
+  // condition is a no-op.
+  const conditions = ['p.available = true', 's.active = true', '(s.manual_selection = false OR p.included = true)'];
+  const params = [];
+
+  if (featured === 'true') conditions.push('p.featured = true');
+  if (section === UNCATEGORIZED) conditions.push('p.section IS NULL');
+  else if (section) { params.push(section); conditions.push(`p.section = $${params.length}`); }
+  if (category_id) { params.push(category_id); conditions.push(`p.category_id = $${params.length}`); }
+  if (supplier) { params.push(supplier); conditions.push(`s.code = $${params.length}`); }
+  // shop_category_id filters by the admin's own category tree (see
+  // routes/adminCategories.js) rather than the raw supplier category —
+  // this is what lets manually-curated subcategories appear as normal
+  // storefront navigation. Selecting a PARENT category also includes
+  // every product filed under any of its subcategories (recursively),
+  // so picking a top-level category on the storefront behaves the way
+  // shoppers expect ("everything in Electronics", not "only products
+  // filed on Electronics itself with nothing in its subcategories").
+  if (shop_category_id) {
+    params.push(shop_category_id);
+    conditions.push(`EXISTS (
         SELECT 1 FROM product_categories pc
         WHERE pc.product_id = p.id
           AND pc.category_id IN (
@@ -94,11 +139,35 @@ router.get('/', async (req, res) => {
             SELECT id FROM branch
           )
       )`);
-    }
-    if (q && q.trim()) {
-      params.push(`%${q.trim()}%`);
-      conditions.push(`(p.name ILIKE $${params.length} OR p.vendor_code ILIKE $${params.length})`);
-    }
+  }
+  if (q && q.trim()) {
+    params.push(`%${q.trim()}%`);
+    conditions.push(`(p.name ILIKE $${params.length} OR p.vendor_code ILIKE $${params.length})`);
+  }
+  return { conditions, params };
+}
+
+// GET /api/products — list available products, paginated and sortable.
+// ?featured=true        -> just your test finalists
+// ?section=...          -> filter by top-level section
+// ?category_id=...      -> filter by specific category within a section
+// ?supplier=code        -> only one supplier's products
+// ?q=...                -> search by name or article/vendor_code
+// ?sort=... ?page=1&limit=24
+router.get('/', async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 24, 1), 100);
+    const offset = (page - 1) * limit;
+    const sortKey = SORT_OPTIONS[req.query.sort] ? req.query.sort : 'newest';
+    const orderBy = SORT_OPTIONS[sortKey];
+
+    const { conditions, params } = baseConditions(req.query);
+    conditions.push(...filterConditions(
+      parseFilters(req.query.filters),
+      { min: parsePrice(req.query.price_min), max: parsePrice(req.query.price_max) },
+      params
+    ));
     const where = conditions.join(' AND ');
 
     const { rows: countRows } = await pool.query(
@@ -146,6 +215,152 @@ router.get('/', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load products' });
+  }
+});
+
+// Службові характеристики, за якими фільтрувати немає сенсу.
+const FACET_KEY_BLACKLIST = /^(артикул|код|штрих|штріх|ean|upc|sku|id$|vendorcode|назва|name$|url|посилання|опис|модель|model)/i;
+
+const FACET_CACHE = new Map(); // кеш відповідей на 60 с: каталог змінюється рідко, а запити важкі
+const FACET_TTL_MS = 60 * 1000;
+
+// GET /api/products/meta/filters?shop_category_id=...&filters=...&price_min=...&price_max=...
+// Будує набір фільтрів із характеристик (params) товарів, що лежать у категорії:
+//   - беремо характеристики, які є у помітної частини товарів і мають небагато
+//     різних значень (унікальні значення на кшталт артикулів чи ваги відсіюються);
+//   - + бренд (products.vendor) та діапазон цін;
+//   - лічильники значень враховують уже вибрані фільтри інших груп, тож
+//     покупець не потрапляє в порожню видачу.
+// Без категорії (shop_category_id) фільтри не будуються — це важкий запит.
+router.get('/meta/filters', async (req, res) => {
+  try {
+    if (!req.query.shop_category_id) return res.json({ total: 0, price: null, filters: [] });
+
+    const cacheKey = req.originalUrl;
+    const hit = FACET_CACHE.get(cacheKey);
+    if (hit && Date.now() - hit.at < FACET_TTL_MS) return res.json(hit.data);
+
+    const filters = parseFilters(req.query.filters);
+    const price = { min: parsePrice(req.query.price_min), max: parsePrice(req.query.price_max) };
+    const base = baseConditions(req.query);
+    const FROM = 'FROM products p JOIN suppliers s ON s.id = p.supplier_id';
+
+    // --- 1) розмір вибірки та діапазон цін (без фільтрів — для стабільного набору груп) ---
+    const { rows: [head] } = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              MIN(p.retail_price) AS pmin, MAX(p.retail_price) AS pmax,
+              COUNT(*) FILTER (WHERE btrim(COALESCE(p.vendor, '')) <> '')::int AS vendor_cov,
+              COUNT(DISTINCT lower(btrim(p.vendor))) FILTER (WHERE btrim(COALESCE(p.vendor, '')) <> '')::int AS vendor_nv
+         ${FROM} WHERE ${base.conditions.join(' AND ')}`,
+      base.params
+    );
+    const total = head.total;
+    const priceRange = head.pmin === null ? null : { min: Number(head.pmin), max: Number(head.pmax) };
+    if (total < 6) {
+      const data = { total, price: priceRange, filters: [] };
+      return res.json(data);
+    }
+
+    // --- 2) які характеристики годяться як фільтри ---
+    const { rows: stats } = await pool.query(
+      `SELECT lower(btrim(e.key)) AS k,
+              mode() WITHIN GROUP (ORDER BY btrim(e.key)) AS label,
+              COUNT(DISTINCT p.id)::int AS cov,
+              COUNT(DISTINCT lower(btrim(e.value)))::int AS nv
+         ${FROM}
+         CROSS JOIN LATERAL jsonb_each_text(${POBJ}) e
+        WHERE ${base.conditions.join(' AND ')}
+          AND btrim(e.key) <> '' AND btrim(e.value) <> '' AND length(e.value) <= 80
+        GROUP BY 1`,
+      base.params
+    );
+    const minCov = Math.max(3, Math.ceil(total * 0.05));
+    const chosen = stats
+      .filter((r) => r.cov >= minCov && r.nv >= 2 && r.nv <= 80 && r.nv <= r.cov * 0.7 && !FACET_KEY_BLACKLIST.test(r.k))
+      .sort((a, b) => b.cov - a.cov)
+      .slice(0, 12);
+    const labels = new Map(chosen.map((r) => [r.k, r.label]));
+    const useVendor = head.vendor_cov >= minCov && head.vendor_nv >= 2 && head.vendor_nv <= 80;
+
+    // --- 3) лічильники значень з урахуванням вибраних фільтрів ---
+    const counts = new Map(); // key -> Map(value -> { label, count })
+    const put = (key, rows) => {
+      const m = counts.get(key) || new Map();
+      for (const r of rows) m.set(r.v, { label: r.label, count: r.cnt });
+      counts.set(key, m);
+    };
+
+    const countParams = (exclude) => {
+      const params = [...base.params];
+      const conds = [...base.conditions, ...filterConditions(filters, price, params, exclude)];
+      return { params, where: conds.join(' AND ') };
+    };
+    const paramCounts = async (keys, exclude) => {
+      if (!keys.length) return [];
+      const { params, where } = countParams(exclude);
+      params.push(keys);
+      const { rows } = await pool.query(
+        `SELECT lower(btrim(e.key)) AS k, lower(btrim(e.value)) AS v,
+                mode() WITHIN GROUP (ORDER BY btrim(e.value)) AS label,
+                COUNT(DISTINCT p.id)::int AS cnt
+           ${FROM}
+           CROSS JOIN LATERAL jsonb_each_text(${POBJ}) e
+          WHERE ${where}
+            AND lower(btrim(e.key)) = ANY($${params.length}::text[])
+            AND btrim(e.value) <> '' AND length(e.value) <= 80
+          GROUP BY 1, 2`,
+        params
+      );
+      return rows;
+    };
+    const vendorCounts = async (exclude) => {
+      const { params, where } = countParams(exclude);
+      const { rows } = await pool.query(
+        `SELECT lower(btrim(p.vendor)) AS v,
+                mode() WITHIN GROUP (ORDER BY btrim(p.vendor)) AS label,
+                COUNT(*)::int AS cnt
+           ${FROM}
+          WHERE ${where} AND btrim(COALESCE(p.vendor, '')) <> ''
+          GROUP BY 1`,
+        params
+      );
+      return rows;
+    };
+
+    // групи без вибору — одним запитом; групи з вибором — окремо, без власного фільтра
+    const keys = chosen.map((r) => r.k);
+    const unselected = keys.filter((k) => !filters[k]);
+    const rowsFree = await paramCounts(unselected);
+    for (const k of unselected) put(k, rowsFree.filter((r) => r.k === k));
+    for (const k of keys.filter((k) => filters[k])) put(k, await paramCounts([k], k));
+    if (useVendor) put(VENDOR_KEY, await vendorCounts(filters[VENDOR_KEY] ? VENDOR_KEY : undefined));
+
+    // --- 4) складаємо відповідь ---
+    const build = (key, label) => {
+      const selected = new Set(filters[key] || []);
+      const m = counts.get(key) || new Map();
+      const values = [...m.entries()]
+        .filter(([, o]) => o.count > 0)
+        .map(([value, o]) => ({ value, label: o.label, count: o.count, selected: selected.has(value) }));
+      for (const v of selected) {
+        if (!values.some((x) => x.value === v)) values.push({ value: v, label: v, count: 0, selected: true });
+      }
+      values.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'uk'));
+      return { key, label, values: values.slice(0, 60) };
+    };
+    const out = [];
+    if (useVendor) out.push(build(VENDOR_KEY, 'Бренд'));
+    for (const k of keys) out.push(build(k, labels.get(k)));
+    // група, де після врахування вибору лишилось менше двох значень, нічого не дає — крім групи з вибором
+    const result = out.filter((f) => f.values.length >= 2 || f.values.some((v) => v.selected));
+
+    const data = { total, price: priceRange, filters: result };
+    if (FACET_CACHE.size > 300) FACET_CACHE.clear();
+    FACET_CACHE.set(cacheKey, { at: Date.now(), data });
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load filters' });
   }
 });
 
