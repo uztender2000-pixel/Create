@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
-const { sendSms } = require('../services/smsClient');
+const { sendSms, isConfigured: smsConfigured, normalizePhone } = require('../services/smsClient');
 const { sendEmail } = require('../services/emailClient');
 
 const router = express.Router();
@@ -26,6 +26,29 @@ async function issuePhoneCode(userId, phone) {
   return sendSms(phone, `OllShop: ваш код підтвердження телефону — ${code}`);
 }
 
+// Код надіслано менше хвилини тому? (код живе 15 хв, тож значення
+// phone_code_expires - 15 хв = момент відправки). Захист від спаму SMS.
+function phoneCodeSentRecently(user) {
+  if (!user.phone_code || !user.phone_code_expires) return false;
+  const sentAt = new Date(user.phone_code_expires).getTime() - 15 * 60 * 1000;
+  return Date.now() - sentAt < 60 * 1000;
+}
+
+function phoneHint(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `…${digits.slice(-4)}` : '';
+}
+
+// Перевіряє email+пароль; повертає користувача або null.
+async function authenticate(email, password) {
+  if (!email || !password) return null;
+  const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [String(email).toLowerCase()]);
+  const user = rows[0];
+  if (!user) return null;
+  const valid = await bcrypt.compare(password, user.password_hash);
+  return valid ? user : null;
+}
+
 async function issueEmailCode(userId, email) {
   const code = generateCode();
   await pool.query('UPDATE users SET email_code = $1, email_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
@@ -33,9 +56,9 @@ async function issueEmailCode(userId, email) {
 }
 
 // POST /api/auth/register — { name, email, phone, password }. Phone is
-// required. Sends verification codes for both phone and email right after
-// signup — verifying them is optional and happens later from the account
-// page, it does not block registration or login.
+// required. Якщо SMS-шлюз налаштований, акаунт створюється, але токен
+// видається лише після підтвердження телефону кодом із SMS
+// (POST /verify-login-phone). Без налаштованого SMS — як раніше.
 router.post('/register', async (req, res) => {
   try {
     const { name, email, phone, password } = req.body;
@@ -44,6 +67,10 @@ router.post('/register', async (req, res) => {
     }
     if (password.length < 6) {
       return res.status(400).json({ error: 'Пароль має бути щонайменше 6 символів' });
+    }
+
+    if (smsConfigured() && !normalizePhone(phone)) {
+      return res.status(400).json({ error: 'Введіть український номер телефону у форматі +380XXXXXXXXX' });
     }
 
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
@@ -60,11 +87,23 @@ router.post('/register', async (req, res) => {
 
     const user = rows[0];
 
-    // Fire-and-forget: don't let a slow/failed SMS or email delay or break
-    // registration itself.
-    issuePhoneCode(user.id, user.phone).catch((err) => console.error('[register] phone code failed:', err.message));
     issueEmailCode(user.id, user.email).catch((err) => console.error('[register] email code failed:', err.message));
 
+    if (smsConfigured()) {
+      // Токен не видаємо: спершу треба підтвердити номер.
+      const sms = await issuePhoneCode(user.id, user.phone).catch((err) => {
+        console.error('[register] phone code failed:', err.message);
+        return { sent: false };
+      });
+      return res.status(201).json({
+        needsVerification: true,
+        email: user.email,
+        phoneHint: phoneHint(user.phone),
+        smsSent: Boolean(sms.sent),
+      });
+    }
+
+    issuePhoneCode(user.id, user.phone).catch((err) => console.error('[register] phone code failed:', err.message));
     res.status(201).json({ user, token: signToken(user) });
   } catch (err) {
     console.error(err);
@@ -72,7 +111,9 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// POST /api/auth/login — { email, password }
+// POST /api/auth/login — { email, password }. Якщо SMS налаштовано, а номер
+// ще не підтверджений — токен не видається: надсилаємо код і відповідаємо
+// 403 { needsVerification: true }.
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -80,22 +121,79 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: "Email і пароль обов'язкові" });
     }
 
-    const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase()]);
-    const user = rows[0];
+    const user = await authenticate(email, password);
     if (!user) {
       return res.status(401).json({ error: 'Невірний email або пароль' });
     }
 
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Невірний email або пароль' });
+    if (smsConfigured() && !user.phone_verified) {
+      let smsSent = true;
+      if (!phoneCodeSentRecently(user)) {
+        const sms = await issuePhoneCode(user.id, user.phone).catch((err) => {
+          console.error('[login] phone code failed:', err.message);
+          return { sent: false };
+        });
+        smsSent = Boolean(sms.sent);
+      }
+      return res.status(403).json({
+        needsVerification: true,
+        email: user.email,
+        phoneHint: phoneHint(user.phone),
+        smsSent,
+        error: 'Підтвердіть номер телефону кодом із SMS',
+      });
     }
 
-    const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone };
+    const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: user.phone_verified };
     res.json({ user: publicUser, token: signToken(publicUser) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося увійти' });
+  }
+});
+
+// POST /api/auth/resend-login-phone-code — { email, password }. Повторно
+// надсилає код підтвердження (не частіше ніж раз на хвилину).
+router.post('/resend-login-phone-code', async (req, res) => {
+  try {
+    const user = await authenticate(req.body.email, req.body.password);
+    if (!user) return res.status(401).json({ error: 'Невірний email або пароль' });
+    if (user.phone_verified) return res.json({ ok: true, alreadyVerified: true });
+    if (phoneCodeSentRecently(user)) {
+      return res.status(429).json({ error: 'Код уже надіслано. Зачекайте хвилину перед повторною відправкою.' });
+    }
+
+    const sms = await issuePhoneCode(user.id, user.phone);
+    if (!sms.sent) {
+      return res.status(503).json({ error: 'Не вдалося надіслати SMS. Спробуйте пізніше.' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося надіслати код' });
+  }
+});
+
+// POST /api/auth/verify-login-phone — { email, password, code }. Підтверджує
+// номер і одразу видає токен (завершує вхід або реєстрацію).
+router.post('/verify-login-phone', async (req, res) => {
+  try {
+    const { email, password, code } = req.body;
+    const user = await authenticate(email, password);
+    if (!user) return res.status(401).json({ error: 'Невірний email або пароль' });
+
+    if (!user.phone_verified) {
+      const valid = user.phone_code && String(code || '').trim() === user.phone_code &&
+        new Date(user.phone_code_expires) >= new Date();
+      if (!valid) return res.status(400).json({ error: 'Невірний або прострочений код' });
+      await pool.query('UPDATE users SET phone_verified = true, phone_code = NULL WHERE id = $1', [user.id]);
+    }
+
+    const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: true };
+    res.json({ user: publicUser, token: signToken(publicUser) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося підтвердити телефон' });
   }
 });
 
