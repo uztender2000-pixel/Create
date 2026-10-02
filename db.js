@@ -414,6 +414,32 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_product_categories_category ON product_categories (category_id);
     CREATE INDEX IF NOT EXISTS idx_orders_group ON orders (group_id);
     CREATE INDEX IF NOT EXISTS idx_orders_supplier ON orders (supplier_id);
+
+    -- ---------------------------------------------------------------------
+    -- Журнал SMS: кожна спроба відправки (кому, що, результат, вартість).
+    -- У SMS-шлюзу немає API «історії відправок», тож ведемо її самі —
+    -- адмін бачить її на сторінці «SMS». Коди підтвердження в text
+    -- замасковані (див. services/smsClient.js).
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS sms_log (
+      id              BIGSERIAL PRIMARY KEY,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+      user_id         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      purpose         TEXT,                         -- 'phone_code' | 'phone_notice' | ...
+      phone           TEXT NOT NULL,
+      text            TEXT,
+      sent            BOOLEAN NOT NULL DEFAULT false,  -- true = шлюз прийняв повідомлення
+      error           TEXT,
+      client_id       BIGINT,                       -- наш id повідомлення (для запиту статусу)
+      gateway_id      TEXT,                         -- id повідомлення в шлюзі
+      parts           INTEGER,
+      price           NUMERIC(10,4),                -- ціна однієї частини за прайсом
+      currency        TEXT,
+      delivery_status TEXT,                         -- ACCEPTED / DELIVERED / ...
+      status_updated  TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_sms_log_created ON sms_log (created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_sms_log_client ON sms_log (client_id);
   `);
 }
 
