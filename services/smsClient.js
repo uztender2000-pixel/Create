@@ -54,6 +54,11 @@ function parseResponse(body) {
   return { ok: true, id: item.data?.msg_id, parts: item.data?.parts };
 }
 
+// true, якщо SMS-шлюз налаштований (є ключ і ім'я відправника).
+function isConfigured() {
+  return Boolean(process.env.SMS_API_KEY && process.env.SMS_SENDER);
+}
+
 async function sendSms(phone, text) {
   const key = process.env.SMS_API_KEY;
   const sender = process.env.SMS_SENDER;
@@ -99,4 +104,4 @@ async function sendSms(phone, text) {
   }
 }
 
-module.exports = { sendSms, normalizePhone, parseResponse };
+module.exports = { sendSms, isConfigured, normalizePhone, parseResponse };
