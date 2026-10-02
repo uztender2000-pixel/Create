@@ -1,22 +1,20 @@
 const axios = require('axios');
 
-// Відправка SMS через TurboSMS (turbosms.ua) — HTTP API.
-// Документація: https://turbosms.ua/en/api.html
+// Відправка SMS через AlphaSMS (alphasms.ua) — JSON API.
+// Документація: https://docs.alphasms.ua/ (розділ JSON API → Відправка SMS)
 //
 // Змінні середовища:
-//   SMS_API_TOKEN — ключ авторизації (кабінет → API → «HTTP API»)
-//   SMS_SENDER    — альфа-ім'я відправника, активоване у вашому акаунті
-//   SMS_API_URL   — (необов'язково) адреса методу відправки. За замовчуванням
-//                   https://api.turbosms.ua/message/send.json
+//   SMS_API_KEY — API-ключ з особистого кабінету AlphaSMS
+//   SMS_SENDER  — альфа-ім'я відправника (латиниця/цифри, до 11 символів)
+//   SMS_API_URL — (необов'язково) адреса API. За замовчуванням
+//                 https://alphasms.ua/api/json.php
 //
-// Поки SMS_API_TOKEN/SMS_SENDER не задані — клієнт нічого не відправляє
+// Поки ключ і ім'я відправника не задані — клієнт нічого не відправляє
 // (no-op), щоб сервер не падав на середовищах без SMS.
 
-const DEFAULT_API_URL = 'https://api.turbosms.ua/message/send.json';
+const DEFAULT_API_URL = 'https://alphasms.ua/api/json.php';
 
-// Відповіді верхнього рівня, які означають, що запит прийнято
-// (0 — OK, 800/801 — створено/відправлено, 802/803 — частково).
-const OK_REQUEST_CODES = new Set([0, 800, 801, 802, 803]);
+const getKey = () => process.env.SMS_API_KEY || process.env.SMS_API_TOKEN;
 
 // Приводить номер до міжнародного формату 380XXXXXXXXX.
 // Приймає: +380501234567, 380501234567, 0501234567, 80501234567,
@@ -30,34 +28,42 @@ function normalizePhone(raw) {
   return null;
 }
 
-// Розбір відповіді. Приклад успіху:
-//   { response_code: 800, response_status: "SUCCESS_MESSAGE_ACCEPTED",
-//     response_result: [ { phone, response_code: 0, message_id: "…", response_status: "OK" } ] }
-// Приклад помилки запиту: { response_code: 105, response_status: "REQUIRED_AUTH", ... }
-// Помилка по отримувачу: response_result[0].response_code != 0 (message_id = null).
+// Унікальний числовий id повідомлення в нашій системі (обов'язкове поле API).
+// Вкладаємось у 32-бітне ціле: час із кроком 100 мс (повтор — не раніше ніж
+// через ~6.8 року), а в межах одного процесу id завжди строго зростає.
+let lastId = 0;
+function nextMessageId() {
+  let id = Math.floor(Date.now() / 100) % 2147483647;
+  if (id <= lastId) id = lastId + 1;
+  lastId = id;
+  return id;
+}
+
+// Розбір відповіді шлюзу. Успіх:
+//   { success: true, data: [ { success: true, data: { id, msg_id, parts } } ] }
+// Помилка запиту:        { success: false, error: "Access denied" }
+// Помилка по повідомленню: data[0].success === false, data[0].error
 function parseResponse(body) {
   if (!body || typeof body !== 'object') {
     return { ok: false, error: 'empty or non-JSON response' };
   }
-  if (!OK_REQUEST_CODES.has(Number(body.response_code))) {
-    return { ok: false, error: `${body.response_status || 'ERROR'} (${body.response_code})` };
+  if (body.success === false) {
+    return { ok: false, error: body.error || 'request failed' };
   }
-  const item = Array.isArray(body.response_result) ? body.response_result[0] : null;
+  const item = Array.isArray(body.data) ? body.data[0] : null;
   if (!item) return { ok: false, error: 'no result in response' };
-  if (Number(item.response_code) !== 0 || !item.message_id) {
-    return { ok: false, error: `${item.response_status || 'ERROR'} (${item.response_code})` };
-  }
-  return { ok: true, id: item.message_id };
+  if (item.success === false) return { ok: false, error: item.error || 'message rejected' };
+  return { ok: true, id: item.data?.msg_id, parts: item.data?.parts };
 }
 
 // true, якщо SMS-шлюз налаштований (є ключ і ім'я відправника).
 function isConfigured() {
-  return Boolean(process.env.SMS_API_TOKEN && process.env.SMS_SENDER);
+  return Boolean(getKey() && process.env.SMS_SENDER);
 }
 
 async function sendSms(phone, text) {
   if (!isConfigured()) {
-    console.warn('[sms] SMS_API_TOKEN/SMS_SENDER not configured — skipping SMS to', phone);
+    console.warn('[sms] SMS_API_KEY/SMS_SENDER not configured — skipping SMS to', phone);
     return { sent: false, reason: 'not_configured' };
   }
 
@@ -68,22 +74,21 @@ async function sendSms(phone, text) {
   }
 
   try {
-    // TurboSMS радить не ставити короткий таймаут на відправку: сервер
-    // обробляє запит повністю, і повтор після обриву дасть дубль SMS.
-    // Тому таймаут великий, а повторів ми не робимо.
     const response = await axios.post(
       process.env.SMS_API_URL || DEFAULT_API_URL,
       {
-        recipients: [to],
-        sms: { sender: process.env.SMS_SENDER, text },
+        auth: getKey(),
+        data: [
+          {
+            type: 'sms',
+            id: nextMessageId(),
+            phone: Number(to),
+            sms_signature: process.env.SMS_SENDER,
+            sms_message: text,
+          },
+        ],
       },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.SMS_API_TOKEN}`,
-        },
-        timeout: 30000,
-      }
+      { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
     );
 
     const result = parseResponse(response.data);
