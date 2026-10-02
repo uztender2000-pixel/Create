@@ -79,7 +79,7 @@ router.patch('/', async (req, res) => {
 
     const user = rows[0];
     if (resetEmailVerified) sendEmail(user.email, 'Підтвердьте новий email — OllShop', 'Зайдіть у свій кабінет OllShop, щоб надіслати новий код підтвердження.').catch(() => {});
-    if (resetPhoneVerified) sendSms(user.phone, 'OllShop: підтвердіть новий номер телефону у своєму кабінеті.').catch(() => {});
+    if (resetPhoneVerified) sendSms(user.phone, 'OllShop: підтвердіть новий номер телефону у своєму кабінеті.', { purpose: 'phone_notice', userId: req.user.id }).catch(() => {});
 
     res.json({ user });
   } catch (err) {
