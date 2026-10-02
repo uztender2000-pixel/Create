@@ -16,6 +16,18 @@ const DEFAULT_API_URL = 'https://alphasms.ua/api/json.php';
 
 const getKey = () => process.env.SMS_API_KEY || process.env.SMS_API_TOKEN;
 
+// Один рядок у логах при старті сервера: видно, чи підхопились змінні (самі значення ключа не логуються).
+console.log(
+  `[sms] AlphaSMS: ключ ${getKey() ? 'задано' : 'НЕ ЗАДАНО'}, відправник ${process.env.SMS_SENDER ? `"${process.env.SMS_SENDER}"` : 'НЕ ЗАДАНО'}, адреса ${process.env.SMS_API_URL || DEFAULT_API_URL}`
+);
+
+const shortBody = (data) => {
+  if (data === undefined || data === null) return '';
+  const text = typeof data === 'string' ? data : JSON.stringify(data);
+  return text.replace(/\s+/g, ' ').slice(0, 300);
+};
+const maskPhone = (to) => `***${String(to).slice(-4)}`;
+
 // Приводить номер до міжнародного формату 380XXXXXXXXX.
 // Приймає: +380501234567, 380501234567, 0501234567, 80501234567,
 // а також номери з пробілами, дужками й дефісами.
@@ -73,6 +85,7 @@ async function sendSms(phone, text) {
     return { sent: false, reason: 'invalid_phone' };
   }
 
+  console.log('[sms] відправка на', maskPhone(to));
   try {
     const response = await axios.post(
       process.env.SMS_API_URL || DEFAULT_API_URL,
@@ -93,12 +106,14 @@ async function sendSms(phone, text) {
 
     const result = parseResponse(response.data);
     if (!result.ok) {
-      console.error('[sms] gateway error:', result.error);
+      console.error('[sms] gateway error:', result.error, '| відповідь шлюзу:', shortBody(response.data));
       return { sent: false, reason: 'api_error', detail: result.error };
     }
+    console.log('[sms] прийнято шлюзом, id =', result.id);
     return { sent: true, id: result.id };
   } catch (err) {
-    console.error('[sms] send failed:', err.response?.data || err.message);
+    const status = err.response?.status ? `HTTP ${err.response.status}` : 'без відповіді';
+    console.error('[sms] send failed:', status, '|', err.message, '|', shortBody(err.response?.data));
     return { sent: false, reason: 'api_error' };
   }
 }
