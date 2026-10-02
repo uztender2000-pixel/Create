@@ -53,6 +53,11 @@ const smsLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders
 app.use('/api/auth/send-phone-code', smsLimiter);
 app.use('/api/auth/verify-phone', rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false }));
 
+// Підтвердження телефону під час входу/реєстрації (кожна успішна реєстрація = 1 SMS).
+app.use('/api/auth/register', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, skipFailedRequests: true, standardHeaders: true, legacyHeaders: false }));
+app.use('/api/auth/resend-login-phone-code', smsLimiter);
+app.use('/api/auth/verify-login-phone', rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false }));
+
 app.get('/', (req, res) => res.json({ ok: true, service: 'OllShop backend' }));
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
