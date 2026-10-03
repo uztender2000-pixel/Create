@@ -24,6 +24,7 @@ const adminProductsRouter = require('./routes/adminProducts');
 const adminCategoriesRouter = require('./routes/adminCategories');
 const adminSqlRouter = require('./routes/adminSql');
 const adminLogsRouter = require('./routes/adminLogs');
+const adminSmsRouter = require('./routes/adminSms');
 const adminSectionTranslationsRouter = require('./routes/adminSectionTranslations');
 const webhooksMydropRouter = require('./routes/webhooksMydrop');
 
@@ -77,6 +78,7 @@ app.use('/api/admin/products', adminProductsRouter);
 app.use('/api/admin/categories', adminCategoriesRouter);
 app.use('/api/admin/sql', adminSqlRouter);
 app.use('/api/admin/logs', adminLogsRouter);
+app.use('/api/admin/sms', adminSmsRouter);
 app.use('/api/admin/section-translations', adminSectionTranslationsRouter);
 app.use('/api/webhooks/mydrop', webhooksMydropRouter);
 
