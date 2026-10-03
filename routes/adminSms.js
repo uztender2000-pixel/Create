@@ -73,7 +73,7 @@ router.get('/', async (req, res) => {
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const count = await pool.query(`SELECT COUNT(*)::int AS n FROM sms_log l ${where}`, params);
-    params.push(limit, offset);
+    const listParams = [...params, limit, offset];
     const { rows } = await pool.query(
       `SELECT l.id, l.created_at, l.purpose, l.phone, l.text, l.sent, l.error, l.parts, l.gateway_id,
               l.price::float AS price, l.currency, l.delivery_status, l.status_updated,
@@ -83,8 +83,8 @@ router.get('/', async (req, res) => {
          LEFT JOIN users u ON u.id = l.user_id
          ${where}
         ORDER BY l.created_at DESC
-        LIMIT $${params.length - 1} OFFSET $${params.length}`,
-      params
+        LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+      listParams
     );
     res.json({ total: count.rows[0].n, items: rows });
   } catch (err) {

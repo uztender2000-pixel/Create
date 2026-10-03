@@ -23,7 +23,7 @@ function codeExpiry() {
 async function issuePhoneCode(userId, phone) {
   const code = generateCode();
   await pool.query('UPDATE users SET phone_code = $1, phone_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
-  return sendSms(phone, `OllShop: ваш код підтвердження телефону — ${code}`);
+  return sendSms(phone, `OllShop: ваш код підтвердження телефону — ${code}`, { purpose: 'phone_code', userId });
 }
 
 // Код надіслано менше хвилини тому? (код живе 15 хв, тож значення
