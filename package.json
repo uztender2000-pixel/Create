@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "sendpulse:verify": "node scripts/sendpulse-test.js --verify",
+    "sendpulse:test": "node scripts/sendpulse-test.js"
   },
   "dependencies": {
     "axios": "^1.20.0",
