@@ -272,7 +272,7 @@ router.post('/send-email-code', requireAuth, async (req, res) => {
       // SMTP_PASS aren't set in this environment; see services/emailClient.js.
       return res.status(503).json({
         error: result.reason === 'not_configured'
-          ? 'Надсилання листів не налаштовано на сервері (SMTP). Зверніться до адміністратора.'
+          ? 'Надсилання листів не налаштовано на сервері. Зверніться до адміністратора.'
           : 'Не вдалося надіслати лист. Спробуйте пізніше.',
       });
     }
