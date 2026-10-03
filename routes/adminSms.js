@@ -19,6 +19,16 @@ async function cachedBalance(force) {
   return value;
 }
 
+// GET /api/admin/sms/balance — лише залишок (для дашборда; без важких запитів до бази).
+router.get('/balance', async (req, res) => {
+  if (!isConfigured()) return res.json({ configured: false });
+  try {
+    res.json({ configured: true, balance: await cachedBalance(false) });
+  } catch (err) {
+    res.json({ configured: true, error: err.message });
+  }
+});
+
 // GET /api/admin/sms/summary — залишок на рахунку + підсумки за 24 год / 7 / 30 днів.
 router.get('/summary', async (req, res) => {
   try {
