@@ -445,6 +445,41 @@ router.get('/meta/categories', async (req, res) => {
   }
 });
 
+// Мозаїка картинок категорії: до 4 фото товарів із її гілки. Беремо по черзі з власних товарів
+// категорії та з кожної підкатегорії (round-robin), щоб картинка «об'єднувала» різні частини
+// гілки, а не складалась із чотирьох однакових товарів однієї підкатегорії.
+function buildCategoryImages(rows, directPics) {
+  const children = new Map();
+  for (const r of rows) {
+    const key = r.parent_id || 'root';
+    if (!children.has(key)) children.set(key, []);
+    children.get(key).push(r);
+  }
+  const memo = new Map();
+  const collect = (id) => {
+    if (memo.has(id)) return memo.get(id);
+    const lists = [directPics.get(id) || [], ...(children.get(id) || []).map((c) => collect(c.id))].filter((l) => l.length);
+    const out = [];
+    const seen = new Set();
+    for (let i = 0; out.length < 4; i += 1) {
+      let progressed = false;
+      for (const list of lists) {
+        if (i >= list.length) continue;
+        progressed = true;
+        const url = list[i];
+        if (!seen.has(url)) { seen.add(url); out.push(url); if (out.length >= 4) break; }
+      }
+      if (!progressed) break;
+    }
+    memo.set(id, out);
+    return out;
+  };
+  return collect;
+}
+
+let shopCategoriesCache = null; // відповідь кешуємо на 60 с: дерево змінюється рідко, а запит до нього — на кожне відкриття сайту
+const SHOP_CATEGORIES_TTL_MS = 60 * 1000;
+
 // GET /api/products/meta/shop-categories — the admin's own category tree
 // (see routes/adminCategories.js), each with how many products currently
 // on sale sit in it (or in any of its subcategories). A category with
@@ -452,6 +487,9 @@ router.get('/meta/categories', async (req, res) => {
 // category is just noise in storefront navigation.
 router.get('/meta/shop-categories', async (req, res) => {
   try {
+    if (shopCategoriesCache && Date.now() - shopCategoriesCache.at < SHOP_CATEGORIES_TTL_MS) {
+      return res.json(shopCategoriesCache.data);
+    }
     const { rows } = await pool.query(
       `WITH RECURSIVE direct_counts AS (
          SELECT pc.category_id, COUNT(*)::int AS cnt
@@ -482,7 +520,32 @@ router.get('/meta/shop-categories', async (req, res) => {
        HAVING COALESCE(SUM(bdc.cnt), 0) > 0
         ORDER BY c.parent_id NULLS FIRST, c.sort_order, c.name`
     );
-    res.json(rows);
+
+    // Фото для мозаїки: до 4 товарів із фото на кожну категорію (за власними товарами категорії);
+    // для батьківських категорій їх збирає buildCategoryImages по всій гілці.
+    const { rows: picRows } = await pool.query(
+      `SELECT category_id, picture_url FROM (
+         SELECT pc.category_id, p.picture_url,
+                ROW_NUMBER() OVER (PARTITION BY pc.category_id ORDER BY p.featured DESC, p.id) AS rn
+           FROM product_categories pc
+           JOIN products p ON p.id = pc.product_id
+           JOIN suppliers s ON s.id = p.supplier_id
+          WHERE p.available = true AND s.active = true
+            AND (s.manual_selection = false OR p.included = true)
+            AND p.picture_url IS NOT NULL AND btrim(p.picture_url) <> ''
+       ) t
+       WHERE rn <= 4`
+    );
+    const directPics = new Map();
+    for (const r of picRows) {
+      if (!directPics.has(r.category_id)) directPics.set(r.category_id, []);
+      directPics.get(r.category_id).push(r.picture_url);
+    }
+    const collect = buildCategoryImages(rows, directPics);
+    const data = rows.map((r) => ({ ...r, images: collect(r.id) }));
+
+    shopCategoriesCache = { at: Date.now(), data };
+    res.json(data);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load shop categories' });

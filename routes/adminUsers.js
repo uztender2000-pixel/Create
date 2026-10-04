@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { pool } = require('../db');
 const { requireAdminAuth, requirePermission } = require('../middleware/adminAuth');
 const { sendEmail } = require('../services/emailClient');
+const { SHOP_NAME } = require('../services/brand');
 
 const router = express.Router();
 router.use(requireAdminAuth, requirePermission('settings')); // owner-only page in practice
@@ -42,8 +43,8 @@ router.post('/', async (req, res) => {
 
     const emailResult = await sendEmail(
       email,
-      'Доступ до панелі керування OllShop',
-      `Вітаємо! Вам створено доступ до адмін-панелі OllShop.\n\nEmail: ${email}\nТимчасовий пароль: ${tempPassword}\n\nПри першому вході систему попросить змінити пароль.`
+      `Доступ до панелі керування ${SHOP_NAME}`,
+      `Вітаємо! Вам створено доступ до адмін-панелі ${SHOP_NAME}.\n\nEmail: ${email}\nТимчасовий пароль: ${tempPassword}\n\nПри першому вході систему попросить змінити пароль.`
     );
 
     res.status(201).json({ user: rows[0], tempPassword, emailSent: emailResult.sent });
@@ -90,7 +91,7 @@ router.post('/:id/reset-password', async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
 
-    const emailResult = await sendEmail(rows[0].email, 'Новий пароль для панелі OllShop', `Ваш новий тимчасовий пароль: ${tempPassword}\n\nПри вході систему попросить його змінити.`);
+    const emailResult = await sendEmail(rows[0].email, `Новий пароль для панелі ${SHOP_NAME}`, `Ваш новий тимчасовий пароль: ${tempPassword}\n\nПри вході систему попросить його змінити.`);
     res.json({ tempPassword, emailSent: emailResult.sent });
   } catch (err) {
     console.error(err);

@@ -5,6 +5,7 @@ const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
 const { sendSms, isConfigured: smsConfigured, normalizePhone } = require('../services/smsClient');
 const { sendEmail } = require('../services/emailClient');
+const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
 
 const router = express.Router();
 
@@ -23,7 +24,7 @@ function codeExpiry() {
 async function issuePhoneCode(userId, phone) {
   const code = generateCode();
   await pool.query('UPDATE users SET phone_code = $1, phone_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
-  return sendSms(phone, `OllShop: ваш код підтвердження телефону — ${code}`, { purpose: 'phone_code', userId });
+  return sendSms(phone, `${SMS_BRAND}: ваш код підтвердження телефону — ${code}`, { purpose: 'phone_code', userId });
 }
 
 // Код надіслано менше хвилини тому? (код живе 15 хв, тож значення
@@ -52,7 +53,7 @@ async function authenticate(email, password) {
 async function issueEmailCode(userId, email) {
   const code = generateCode();
   await pool.query('UPDATE users SET email_code = $1, email_code_expires = $2 WHERE id = $3', [code, codeExpiry(), userId]);
-  return sendEmail(email, 'Підтвердження email — OllShop', `Ваш код підтвердження email: ${code}\n\nКод дійсний 15 хвилин.`);
+  return sendEmail(email, `Підтвердження email — ${SHOP_NAME}`, `Ваш код підтвердження email: ${code}\n\nКод дійсний 15 хвилин.`);
 }
 
 // POST /api/auth/register — { name, email, phone, password }. Phone is
@@ -325,7 +326,7 @@ router.post('/forgot-password', async (req, res) => {
       );
       sendEmail(
         user.email,
-        'Скидання пароля — OllShop',
+        `Скидання пароля — ${SHOP_NAME}`,
         `Ваш код для скидання пароля: ${code}\n\nКод дійсний 15 хвилин. Якщо ви не запитували скидання пароля, просто проігноруйте цей лист.`
       ).catch((err) => console.error('[forgot-password] email failed:', err.message));
     }
