@@ -5,7 +5,7 @@ const axios = require('axios');
 //
 // Hubber (office.hubber.pro) is a Ukrainian B2B marketplace-integration
 // platform: suppliers list products, and connected marketplaces (like
-// OllShop) pick which ones to sell and place orders through its REST
+// В Хату.UA) pick which ones to sell and place orders through its REST
 // API. Unlike MyDrop/TradeEvo, there is no YML feed involved — catalogue,
 // orders and everything else go through JSON endpoints.
 //
