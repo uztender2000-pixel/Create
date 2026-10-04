@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const sendpulse = require('./sendpulseClient');
+const { SHOP_NAME } = require('./brand');
 
 let transporter = null;
 function getTransporter() {
@@ -30,7 +31,7 @@ const textToHtml = (text) => `<div style="font-family:Arial,Helvetica,sans-serif
 async function sendEmail(to, subject, text) {
   if (sendpulse.isConfigured()) {
     try {
-      await sendpulse.sendEmail({ to, subject, text, html: textToHtml(text) });
+      await sendpulse.sendEmail({ to, subject, text, html: textToHtml(text), fromName: process.env.SENDPULSE_API_FROM_NAME || SHOP_NAME });
       return { sent: true, provider: 'sendpulse' };
     } catch (err) {
       console.error('[email] SendPulse:', err.message);
