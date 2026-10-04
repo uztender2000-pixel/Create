@@ -28,7 +28,7 @@
    |---|---|---|
    | `SENDPULSE_API_KEY` | так | API-ключ |
    | `SENDPULSE_API_FROM_EMAIL` | так | підтверджений відправник (для тесту: `devtest@sendpulseemail.com`) |
-   | `SENDPULSE_API_FROM_NAME` | ні | ім'я відправника, наприклад `OllShop` |
+   | `SENDPULSE_API_FROM_NAME` | ні | ім'я відправника, наприклад `В Хату.UA` (за замовчуванням береться `SHOP_NAME`) |
    | `SENDPULSE_API_BASE_URL` | ні | за замовчуванням `https://api.sendpulse.com` |
 
 3. **Перевірте ключ:**

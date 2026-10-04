@@ -25,6 +25,7 @@ const adminCategoriesRouter = require('./routes/adminCategories');
 const adminSqlRouter = require('./routes/adminSql');
 const adminLogsRouter = require('./routes/adminLogs');
 const adminSmsRouter = require('./routes/adminSms');
+const { SHOP_NAME } = require('./services/brand');
 const adminSectionTranslationsRouter = require('./routes/adminSectionTranslations');
 const webhooksMydropRouter = require('./routes/webhooksMydrop');
 
@@ -59,7 +60,7 @@ app.use('/api/auth/register', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, skip
 app.use('/api/auth/resend-login-phone-code', smsLimiter);
 app.use('/api/auth/verify-login-phone', rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false }));
 
-app.get('/', (req, res) => res.json({ ok: true, service: 'OllShop backend' }));
+app.get('/', (req, res) => res.json({ ok: true, service: `${SHOP_NAME} backend` }));
 app.get('/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 app.use('/api/products', productsRouter);
