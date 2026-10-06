@@ -440,6 +440,31 @@ async function initSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_sms_log_created ON sms_log (created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_sms_log_client ON sms_log (client_id);
+
+    -- ---------------------------------------------------------------------
+    -- Відгуки про товари. Один відгук від користувача на товар.
+    -- status: 'pending' (чекає модерації) | 'published' | 'hidden' (сховано адміном).
+    -- Відгуки покупців (є відправлене/виконане замовлення цього товару) публікуються
+    -- одразу з позначкою «Підтверджена покупка», решта проходять модерацію.
+    -- author_name — знімок імені на момент написання («Іван П.»), щоб не світити повне прізвище.
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS product_reviews (
+      id                BIGSERIAL PRIMARY KEY,
+      product_id        BIGINT  NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      rating            SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      text              TEXT,
+      author_name       TEXT NOT NULL,
+      verified_purchase BOOLEAN NOT NULL DEFAULT false,
+      status            TEXT NOT NULL DEFAULT 'pending',
+      admin_reply       TEXT,
+      admin_reply_at    TIMESTAMPTZ,
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (product_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_reviews_product ON product_reviews (product_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reviews_status  ON product_reviews (status, created_at DESC);
   `);
 }
 
