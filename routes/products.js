@@ -147,6 +147,23 @@ function baseConditions(query) {
   return { conditions, params };
 }
 
+// Додає до товарів середню оцінку й кількість опублікованих відгуків (rating_avg, rating_count) одним запитом.
+async function attachRatings(products) {
+  if (!products.length) return products;
+  const { rows } = await pool.query(
+    `SELECT product_id, ROUND(AVG(rating)::numeric, 1)::float AS avg, COUNT(*)::int AS cnt
+       FROM product_reviews
+      WHERE status = 'published' AND product_id = ANY($1::bigint[])
+      GROUP BY product_id`,
+    [products.map((p) => p.id)]
+  );
+  const byId = new Map(rows.map((r) => [String(r.product_id), r]));
+  return products.map((p) => {
+    const r = byId.get(String(p.id));
+    return { ...p, rating_avg: r ? r.avg : 0, rating_count: r ? r.cnt : 0 };
+  });
+}
+
 // GET /api/products — list available products, paginated and sortable.
 // ?featured=true        -> just your test finalists
 // ?section=...          -> filter by top-level section
@@ -208,7 +225,7 @@ router.get('/', async (req, res) => {
     }));
 
     res.json({
-      products,
+      products: await attachRatings(products),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       sort: sortKey,
     });
@@ -641,7 +658,7 @@ router.get('/recommended', optionalAuth, async (req, res) => {
 
     // shuffle so the personalised picks aren't grouped category by category
     const products = [...picked.values()].slice(0, limit).sort(() => Math.random() - 0.5);
-    res.json({ products, personalized });
+    res.json({ products: await attachRatings(products), personalized });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load recommendations' });
