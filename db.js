@@ -189,6 +189,9 @@ async function initSchema() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_city_ref TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_branch TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS saved_courier_address TEXT;
+    -- Згода з Правилами та умовами (terms.html): коли й яку редакцію прийнято. Потрібно як підтвердження згоди.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version TEXT;
 
     -- Added for the manual product-selection feature; safe to run even if
     -- the CREATE TABLE above already ran and created products/suppliers
@@ -465,6 +468,15 @@ async function initSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_reviews_product ON product_reviews (product_id, status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_reviews_status  ON product_reviews (status, created_at DESC);
+
+    -- Облік використання ШІ-помічника по днях: денний ліміт повідомлень захищає від несподіваних витрат
+    -- (лічильник у базі, а не в пам'яті, тож не скидається при перезапуску сервера).
+    CREATE TABLE IF NOT EXISTS assistant_usage (
+      day            DATE PRIMARY KEY DEFAULT CURRENT_DATE,
+      requests       INTEGER NOT NULL DEFAULT 0,
+      input_tokens   BIGINT  NOT NULL DEFAULT 0,
+      output_tokens  BIGINT  NOT NULL DEFAULT 0
+    );
   `);
 }
 

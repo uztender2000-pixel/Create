@@ -26,6 +26,8 @@ const adminSqlRouter = require('./routes/adminSql');
 const adminLogsRouter = require('./routes/adminLogs');
 const adminSmsRouter = require('./routes/adminSms');
 const reviewsRouter = require('./routes/reviews');
+const assistantRouter = require('./routes/assistant');
+const adminAssistantRouter = require('./routes/adminAssistant');
 const adminReviewsRouter = require('./routes/adminReviews');
 const { SHOP_NAME } = require('./services/brand');
 const adminSectionTranslationsRouter = require('./routes/adminSectionTranslations');
@@ -87,7 +89,12 @@ app.use('/api/admin/sql', adminSqlRouter);
 app.use('/api/admin/logs', adminLogsRouter);
 app.use('/api/admin/sms', adminSmsRouter);
 app.use('/api/admin/reviews', adminReviewsRouter);
+app.use('/api/admin/assistant', adminAssistantRouter);
 app.use('/api/reviews', reviewsRouter);
+
+// ШІ-помічник: кожне повідомлення коштує грошей, тож окремий ліміт на адресу (плюс добовий ліміт у самому сервісі).
+app.use('/api/assistant', rateLimit({ windowMs: 10 * 60 * 1000, max: 25, standardHeaders: true, legacyHeaders: false, message: { error: 'Забагато повідомлень. Зачекайте кілька хвилин.' } }));
+app.use('/api/assistant', assistantRouter);
 app.use('/api/admin/section-translations', adminSectionTranslationsRouter);
 app.use('/api/webhooks/mydrop', webhooksMydropRouter);
 
