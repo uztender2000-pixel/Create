@@ -10,6 +10,8 @@ router.get('/', (req, res) => {
     // suppliers.fulfillment_type) — we're the seller of record for those,
     // so the customer sees our own shop rather than the wholesaler behind it.
     shopName: process.env.SHOP_NAME || 'В Хату.UA',
+    // Віджет чату з ШІ-помічником показуємо лише тоді, коли на сервері задано ключ Anthropic API.
+    assistantEnabled: Boolean(process.env.ANTHROPIC_API_KEY),
   });
 });
 

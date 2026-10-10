@@ -56,15 +56,22 @@ async function issueEmailCode(userId, email) {
   return sendEmail(email, `Підтвердження email — ${SHOP_NAME}`, `Ваш код підтвердження email: ${code}\n\nКод дійсний 15 хвилин.`);
 }
 
-// POST /api/auth/register — { name, email, phone, password }. Phone is
+// Редакція Правил та умов (frontend/terms.html), яку приймає користувач при реєстрації. Змінили текст правил —
+// змініть тут (або змінною TERMS_VERSION на Render) і в terms.html, щоб у базі було видно, яку редакцію хто прийняв.
+const TERMS_VERSION = process.env.TERMS_VERSION || '2026-10-09';
+
+// POST /api/auth/register — { name, email, phone, password, acceptTerms: true }. Phone is
 // required. Якщо SMS-шлюз налаштований, акаунт створюється, але токен
 // видається лише після підтвердження телефону кодом із SMS
 // (POST /verify-login-phone). Без налаштованого SMS — як раніше.
 router.post('/register', async (req, res) => {
   try {
-    const { name, email, phone, password } = req.body;
+    const { name, email, phone, password, acceptTerms } = req.body;
     if (!name || !email || !password || !phone) {
       return res.status(400).json({ error: "Ім'я, email, телефон і пароль обов'язкові" });
+    }
+    if (acceptTerms !== true) {
+      return res.status(400).json({ error: 'Підтвердіть, що ви ознайомились із правилами та умовами' });
     }
     if (password.length < 6) {
       return res.status(400).json({ error: 'Пароль має бути щонайменше 6 символів' });
@@ -81,9 +88,9 @@ router.post('/register', async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
-      `INSERT INTO users (name, email, phone, password_hash) VALUES ($1, $2, $3, $4)
+      `INSERT INTO users (name, email, phone, password_hash, terms_accepted_at, terms_version) VALUES ($1, $2, $3, $4, now(), $5)
        RETURNING id, name, email, phone`,
-      [name, email.toLowerCase(), phone, passwordHash]
+      [name, email.toLowerCase(), phone, passwordHash, TERMS_VERSION]
     );
 
     const user = rows[0];
