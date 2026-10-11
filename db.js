@@ -469,6 +469,47 @@ async function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_reviews_product ON product_reviews (product_id, status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_reviews_status  ON product_reviews (status, created_at DESC);
 
+    -- ---------------------------------------------------------------------
+    -- Правила та умови з історією редакцій. Редакція ніколи не перезаписується:
+    -- кожна зміна тексту — новий рядок. owner_snapshot — публічні реквізити
+    -- власника на момент публікації (щоб стара редакція показувала ті дані,
+    -- що діяли тоді). require_acceptance — чи мусять покупці прийняти редакцію
+    -- повторно (false — для дрібних правок).
+    -- ---------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS terms_versions (
+      id                 SERIAL PRIMARY KEY,
+      version            TEXT UNIQUE NOT NULL,          -- '2026-10-09', '2026-10-09-2', ...
+      title              TEXT NOT NULL,
+      content            TEXT NOT NULL,
+      owner_snapshot     JSONB NOT NULL DEFAULT '{}',
+      effective_date     DATE NOT NULL DEFAULT CURRENT_DATE,
+      change_summary     TEXT,                          -- «що змінилось» — його бачать покупці
+      require_acceptance BOOLEAN NOT NULL DEFAULT true,
+      published_by       TEXT,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    -- Журнал згод: хто, коли і з якою редакцією погодився.
+    CREATE TABLE IF NOT EXISTS terms_acceptances (
+      id               BIGSERIAL PRIMARY KEY,
+      user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      terms_version_id INTEGER REFERENCES terms_versions(id),
+      version          TEXT NOT NULL,
+      accepted_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+      ip               TEXT,
+      user_agent       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_terms_acceptances_user ON terms_acceptances (user_id, accepted_at DESC);
+
+    -- Налаштування сайту «ключ → JSON». Ключ 'owner' — реквізити власника
+    -- (ТОВ / АТ / ФОП): див. services/ownerInfo.js.
+    CREATE TABLE IF NOT EXISTS site_settings (
+      key         TEXT PRIMARY KEY,
+      value       JSONB NOT NULL DEFAULT '{}',
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by  TEXT
+    );
+
     -- Облік використання ШІ-помічника по днях: денний ліміт повідомлень захищає від несподіваних витрат
     -- (лічильник у базі, а не в пам'яті, тож не скидається при перезапуску сервера).
     CREATE TABLE IF NOT EXISTS assistant_usage (

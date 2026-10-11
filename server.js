@@ -32,6 +32,10 @@ const adminReviewsRouter = require('./routes/adminReviews');
 const { SHOP_NAME } = require('./services/brand');
 const adminSectionTranslationsRouter = require('./routes/adminSectionTranslations');
 const webhooksMydropRouter = require('./routes/webhooksMydrop');
+const termsRouter = require('./routes/terms');
+const adminTermsRouter = require('./routes/adminTerms');
+const adminOwnerRouter = require('./routes/adminOwner');
+const { ensureInitialTerms } = require('./services/termsService');
 
 const app = express();
 
@@ -97,6 +101,9 @@ app.use('/api/assistant', rateLimit({ windowMs: 10 * 60 * 1000, max: 25, standar
 app.use('/api/assistant', assistantRouter);
 app.use('/api/admin/section-translations', adminSectionTranslationsRouter);
 app.use('/api/webhooks/mydrop', webhooksMydropRouter);
+app.use('/api/terms', termsRouter);
+app.use('/api/admin/terms', adminTermsRouter);
+app.use('/api/admin/owner', adminOwnerRouter);
 
 const PORT = process.env.PORT || 3000;
 
@@ -134,6 +141,7 @@ async function start() {
 
   await seedInitialAdmin();
   await seedSuppliersFromEnv();
+  await ensureInitialTerms();
 
   // Start serving straight away. The first catalogue pull runs in the
   // background: with several suppliers it can take minutes, and the API
