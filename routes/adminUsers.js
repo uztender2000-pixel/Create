@@ -2,17 +2,21 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { pool } = require('../db');
-const { requireAdminAuth, requirePermission } = require('../middleware/adminAuth');
+const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminRole } = require('../middleware/adminRole');
+const { mfaRequiredFor } = require('../middleware/adminAuth');
 const { sendEmail } = require('../services/emailClient');
 const { SHOP_NAME } = require('../services/brand');
 
 const router = express.Router();
-router.use(requireAdminAuth, requirePermission('settings')); // owner-only page in practice
+// Лише роль «Адміністратор». Раніше сюди пускало будь-кого з правом settings — такий працівник міг
+// призначити собі роль admin або скинути пароль власника. Тепер це неможливо.
+router.use(requireAdminAuth, requireAdminRole);
 
 // GET /api/admin/users — list every admin/staff account
 router.get('/', async (req, res) => {
   const { rows } = await pool.query(
-    'SELECT id, name, email, role, permissions, active, must_change_password, created_at FROM admin_users ORDER BY created_at ASC'
+    'SELECT id, name, email, role, permissions, active, must_change_password, created_at, mfa_enabled, locked_until FROM admin_users ORDER BY created_at ASC'
   );
   res.json(rows);
 });
@@ -61,10 +65,16 @@ router.patch('/:id', async (req, res) => {
     const updates = [];
     const params = [];
 
+    // Щоб випадково не залишитися без адміністратора: себе не можна деактивувати чи понизити.
+    if (String(req.params.id) === String(req.admin.id) && (active === false || (role && role !== 'admin'))) {
+      return res.status(400).json({ error: 'Не можна деактивувати або понизити власний обліковий запис' });
+    }
+
     if (role) { params.push(role === 'admin' ? 'admin' : 'staff'); updates.push(`role = $${params.length}`); }
     if (permissions) { params.push(JSON.stringify(permissions)); updates.push(`permissions = $${params.length}`); }
     if (active !== undefined) { params.push(active); updates.push(`active = $${params.length}`); }
     if (!updates.length) return res.status(400).json({ error: 'Немає що оновлювати' });
+    updates.push('token_version = token_version + 1');   // зміна ролі/прав/активності завершує його поточні сесії
 
     params.push(req.params.id);
     const { rows } = await pool.query(
@@ -86,7 +96,7 @@ router.post('/:id/reset-password', async (req, res) => {
     const tempPassword = crypto.randomBytes(6).toString('base64url');
     const passwordHash = await bcrypt.hash(tempPassword, 10);
     const { rows } = await pool.query(
-      'UPDATE admin_users SET password_hash = $1, must_change_password = true WHERE id = $2 RETURNING email',
+      'UPDATE admin_users SET password_hash = $1, must_change_password = true, token_version = token_version + 1, failed_logins = 0, locked_until = NULL WHERE id = $2 RETURNING email',
       [passwordHash, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
@@ -97,6 +107,30 @@ router.post('/:id/reset-password', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося скинути пароль' });
   }
+});
+
+// POST /api/admin/users/:id/unlock — знімає тимчасове блокування після невдалих спроб входу
+router.post('/:id/unlock', async (req, res) => {
+  const { rowCount } = await pool.query('UPDATE admin_users SET failed_logins = 0, locked_until = NULL WHERE id = $1', [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+
+// POST /api/admin/users/:id/reset-mfa — скидає 2FA (втрачено телефон і резервні коди) та завершує
+// всі його сесії. Якщо 2FA для ролі обов'язкова, людина налаштує її знову при наступному вході.
+router.post('/:id/reset-mfa', async (req, res) => {
+  const { rowCount } = await pool.query(
+    `UPDATE admin_users SET mfa_enabled = false, mfa_secret = NULL, mfa_backup_codes = '[]'::jsonb, mfa_last_step = NULL,
+            token_version = token_version + 1 WHERE id = $1`, [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+
+// POST /api/admin/users/:id/revoke-sessions — завершує всі активні сесії користувача
+router.post('/:id/revoke-sessions', async (req, res) => {
+  const { rowCount } = await pool.query('UPDATE admin_users SET token_version = token_version + 1 WHERE id = $1', [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
 });
 
 module.exports = router;

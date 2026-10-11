@@ -7,16 +7,22 @@ const { sendSms, isConfigured: smsConfigured, normalizePhone } = require('../ser
 const { sendEmail } = require('../services/emailClient');
 const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
 const { getCurrentRow, recordAcceptance } = require('../services/termsService');
+const { validatePassword } = require('../services/passwordPolicy');
+const crypto = require('crypto');
 
 const router = express.Router();
 
-function signToken(user) {
-  return jwt.sign({ userId: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '30d' });
+// tv — версія токенів користувача (users.token_version): зміна пароля чи «вийти на всіх пристроях»
+// робить усі старі токени недійсними (див. middleware/auth.js). Термін дії скорочено з 30 до 14 днів.
+function signToken(user, tokenVersion = user.token_version || 0) {
+  return jwt.sign({ userId: user.id, email: user.email, tv: tokenVersion }, process.env.JWT_SECRET, { expiresIn: '14d' });
 }
 
 function generateCode() {
-  return String(Math.floor(100000 + Math.random() * 900000)); // 6-digit code
+  return String(crypto.randomInt(100000, 1000000)); // 6-digit code, криптостійкий генератор
 }
+
+const MAX_CODE_ATTEMPTS = 5;   // стільки хибних кодів — і код анулюється (треба запросити новий)
 
 function codeExpiry() {
   return new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
@@ -42,13 +48,15 @@ function phoneHint(phone) {
 }
 
 // Перевіряє email+пароль; повертає користувача або null.
+const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-timing-equalisation', 10);
+
 async function authenticate(email, password) {
   if (!email || !password) return null;
   const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [String(email).toLowerCase()]);
   const user = rows[0];
-  if (!user) return null;
-  const valid = await bcrypt.compare(password, user.password_hash);
-  return valid ? user : null;
+  // Хеш порівнюємо і для неіснуючого email — за часом відповіді не видно, чи зареєстровано пошту.
+  const valid = await bcrypt.compare(password, user ? user.password_hash : DUMMY_HASH);
+  return user && valid ? user : null;
 }
 
 async function issueEmailCode(userId, email) {
@@ -73,8 +81,9 @@ router.post('/register', async (req, res) => {
     if (acceptTerms !== true) {
       return res.status(400).json({ error: 'Підтвердіть, що ви ознайомились із правилами та умовами' });
     }
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Пароль має бути щонайменше 6 символів' });
+    const policyError = validatePassword(password, { email, name });
+    if (policyError) {
+      return res.status(400).json({ error: policyError });
     }
 
     if (smsConfigured() && !normalizePhone(phone)) {
@@ -157,7 +166,7 @@ router.post('/login', async (req, res) => {
     }
 
     const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: user.phone_verified };
-    res.json({ user: publicUser, token: signToken(publicUser) });
+    res.json({ user: publicUser, token: signToken(publicUser, user.token_version) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося увійти' });
@@ -195,14 +204,25 @@ router.post('/verify-login-phone', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Невірний email або пароль' });
 
     if (!user.phone_verified) {
-      const valid = user.phone_code && String(code || '').trim() === user.phone_code &&
+      const given = String(code || '').trim();
+      const valid = user.phone_code && given.length === user.phone_code.length &&
+        crypto.timingSafeEqual(Buffer.from(given), Buffer.from(user.phone_code)) &&
         new Date(user.phone_code_expires) >= new Date();
-      if (!valid) return res.status(400).json({ error: 'Невірний або прострочений код' });
-      await pool.query('UPDATE users SET phone_verified = true, phone_code = NULL WHERE id = $1', [user.id]);
+      if (!valid) {
+        // Перебір 6-значного коду: після MAX_CODE_ATTEMPTS помилок код анулюється.
+        if (user.phone_code) {
+          await pool.query(
+            `UPDATE users SET phone_code_attempts = phone_code_attempts + 1,
+                    phone_code = CASE WHEN phone_code_attempts + 1 >= $2 THEN NULL ELSE phone_code END WHERE id = $1`,
+            [user.id, MAX_CODE_ATTEMPTS]);
+        }
+        return res.status(400).json({ error: 'Невірний або прострочений код' });
+      }
+      await pool.query('UPDATE users SET phone_verified = true, phone_code = NULL, phone_code_attempts = 0 WHERE id = $1', [user.id]);
     }
 
     const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: true };
-    res.json({ user: publicUser, token: signToken(publicUser) });
+    res.json({ user: publicUser, token: signToken(publicUser, user.token_version) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося підтвердити телефон' });
@@ -357,23 +377,36 @@ router.post('/reset-password', async (req, res) => {
     if (!email || !code || !newPassword) {
       return res.status(400).json({ error: "Email, код і новий пароль обов'язкові" });
     }
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'Пароль має бути щонайменше 6 символів' });
+    const policyError = validatePassword(newPassword, { email });
+    if (policyError) {
+      return res.status(400).json({ error: policyError });
     }
 
     const { rows } = await pool.query(
       'SELECT id, password_reset_code, password_reset_code_expires FROM users WHERE email = $1',
-      [email.toLowerCase()]
+      [String(email).toLowerCase()]
     );
     const user = rows[0];
-    if (!user || !user.password_reset_code || user.password_reset_code !== code ||
-        new Date(user.password_reset_code_expires) < new Date()) {
+    const given = String(code).trim();
+    const codeOk = user && user.password_reset_code && given.length === user.password_reset_code.length &&
+      crypto.timingSafeEqual(Buffer.from(given), Buffer.from(user.password_reset_code)) &&
+      new Date(user.password_reset_code_expires) >= new Date();
+    if (!codeOk) {
+      // Перебір коду: після MAX_CODE_ATTEMPTS помилок код анулюється.
+      if (user && user.password_reset_code) {
+        await pool.query(
+          `UPDATE users SET reset_attempts = reset_attempts + 1,
+                  password_reset_code = CASE WHEN reset_attempts + 1 >= $2 THEN NULL ELSE password_reset_code END WHERE id = $1`,
+          [user.id, MAX_CODE_ATTEMPTS]);
+      }
       return res.status(400).json({ error: 'Невірний або прострочений код' });
     }
 
-    const passwordHash = await bcrypt.hash(newPassword, 10);
+    // Новий пароль → усі раніше видані токени цього користувача стають недійсними.
+    const passwordHash = await bcrypt.hash(newPassword, 12);
     await pool.query(
-      'UPDATE users SET password_hash = $1, password_reset_code = NULL, password_reset_code_expires = NULL WHERE id = $2',
+      `UPDATE users SET password_hash = $1, password_reset_code = NULL, password_reset_code_expires = NULL,
+              reset_attempts = 0, token_version = token_version + 1 WHERE id = $2`,
       [passwordHash, user.id]
     );
 

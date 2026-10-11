@@ -7,6 +7,8 @@ const { sendSms } = require('../services/smsClient');
 const { sendEmail } = require('../services/emailClient');
 const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
 const { getCurrentRow, getRowByVersion, withHtml, getTermsStatus, recordAcceptance } = require('../services/termsService');
+const { validatePassword } = require('../services/passwordPolicy');
+const jwt = require('jsonwebtoken');
 
 const router = express.Router();
 router.use(requireAuth); // every account route requires login
@@ -90,21 +92,39 @@ router.patch('/', async (req, res) => {
   }
 });
 
+function signUserToken(u) {
+  return jwt.sign({ userId: u.id, email: u.email, tv: u.token_version }, process.env.JWT_SECRET, { expiresIn: '14d' });
+}
+
+// POST /api/account/logout-all — завершує сесії на ВСІХ пристроях, крім поточного (він отримує новий токен).
+router.post('/logout-all', async (req, res) => {
+  try {
+    const upd = await pool.query('UPDATE users SET token_version = token_version + 1 WHERE id = $1 RETURNING id, email, token_version', [req.user.id]);
+    res.json({ ok: true, token: signUserToken(upd.rows[0]) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося завершити сесії' });
+  }
+});
+
 // PATCH /api/account/password — { currentPassword, newPassword }
 router.patch('/password', async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    if (!currentPassword || !newPassword || newPassword.length < 6) {
-      return res.status(400).json({ error: 'Потрібні поточний і новий пароль (мінімум 6 символів)' });
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Потрібні поточний і новий пароль' });
     }
 
-    const { rows } = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    const { rows } = await pool.query('SELECT password_hash, email, name FROM users WHERE id = $1', [req.user.id]);
+    const policyError = validatePassword(newPassword, { email: rows[0].email, name: rows[0].name });
+    if (policyError) return res.status(400).json({ error: policyError });
     const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
     if (!valid) return res.status(401).json({ error: 'Поточний пароль невірний' });
 
-    const newHash = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, req.user.id]);
-    res.json({ ok: true });
+    // Усі інші пристрої розлогінюються; цьому віддаємо свіжий токен.
+    const newHash = await bcrypt.hash(newPassword, 12);
+    const upd = await pool.query('UPDATE users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2 RETURNING id, email, token_version', [newHash, req.user.id]);
+    res.json({ ok: true, token: signUserToken(upd.rows[0]) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося змінити пароль' });
