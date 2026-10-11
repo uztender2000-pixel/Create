@@ -510,6 +510,34 @@ async function initSchema() {
       updated_by  TEXT
     );
 
+    -- Журнал дій в адмінці (хто, коли, що змінив; див. middleware/auditLog.js).
+    CREATE TABLE IF NOT EXISTS admin_audit_log (
+      id          BIGSERIAL PRIMARY KEY,
+      admin_id    INTEGER,
+      admin_email TEXT,
+      method      TEXT NOT NULL,
+      path        TEXT NOT NULL,
+      status      INTEGER,
+      ip          TEXT,
+      user_agent  TEXT,
+      detail      JSONB,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log (created_at DESC);
+
+    -- Безпека облікових записів: версія токенів (відкликання сесій), блокування після невдалих
+    -- спроб входу, двофакторна автентифікація (секрет зберігається зашифрованим).
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_code_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS failed_logins INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_secret TEXT;
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_backup_codes JSONB NOT NULL DEFAULT '[]';
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_last_step BIGINT;
+
     -- Облік використання ШІ-помічника по днях: денний ліміт повідомлень захищає від несподіваних витрат
     -- (лічильник у базі, а не в пам'яті, тож не скидається при перезапуску сервера).
     CREATE TABLE IF NOT EXISTS assistant_usage (

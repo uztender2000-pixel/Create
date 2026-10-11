@@ -36,6 +36,8 @@ const termsRouter = require('./routes/terms');
 const adminTermsRouter = require('./routes/adminTerms');
 const adminOwnerRouter = require('./routes/adminOwner');
 const { ensureInitialTerms } = require('./services/termsService');
+const adminAuditRouter = require('./routes/adminAudit');
+const { auditLog, purgeOldAuditLog } = require('./middleware/auditLog');
 
 const app = express();
 
@@ -43,10 +45,22 @@ const app = express();
 // (адресу проксі), і rate limit спрацьовує одразу на всіх разом.
 app.set('trust proxy', 1);
 
-app.use(helmet({ contentSecurityPolicy: false }));
+// Бекенд віддає лише JSON, тому політика максимально сувора: нічого не виконується і не вбудовується.
+app.use(helmet({
+  contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"], baseUri: ["'none'"], formAction: ["'none'"] } },
+  referrerPolicy: { policy: 'no-referrer' },
+  crossOriginResourcePolicy: { policy: 'cross-origin' },   // фронтенд на іншому домені читає відповіді API
+}));
 
-const allowedOrigin = process.env.FRONTEND_ORIGIN;
-app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
+// FRONTEND_ORIGIN — адреса(и) фронтенду через кому, напр. https://shop.com,https://www.shop.com.
+// Без неї API відкрите для запитів з БУДЬ-ЯКОГО сайту: обов'язково задайте її на Render.
+const allowedOrigins = String(process.env.FRONTEND_ORIGIN || '').split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
+if (!allowedOrigins.length) {
+  console.warn('[security] ⚠ FRONTEND_ORIGIN не задано — CORS дозволяє запити з будь-якого сайту. Задайте адресу фронтенду!');
+}
+app.use(cors(allowedOrigins.length
+  ? { origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)) }
+  : {}));
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -82,6 +96,7 @@ app.use('/api/cart', cartRouter);
 app.use('/api/delivery', deliveryRouter);
 app.use('/api/account', accountRouter);
 app.use('/api/config', configRouter);
+app.use('/api/admin', auditLog);   // журнал дій: усі зміни й спроби входу в адмінці
 app.use('/api/admin/auth', adminAuthRouter);
 app.use('/api/admin/users', adminUsersRouter);
 app.use('/api/admin/orders', adminOrdersRouter);
@@ -104,6 +119,7 @@ app.use('/api/webhooks/mydrop', webhooksMydropRouter);
 app.use('/api/terms', termsRouter);
 app.use('/api/admin/terms', adminTermsRouter);
 app.use('/api/admin/owner', adminOwnerRouter);
+app.use('/api/admin/audit', adminAuditRouter);
 
 const PORT = process.env.PORT || 3000;
 
@@ -142,6 +158,7 @@ async function start() {
   await seedInitialAdmin();
   await seedSuppliersFromEnv();
   await ensureInitialTerms();
+  await purgeOldAuditLog().catch((e) => console.error('[audit] очищення:', e.message));
 
   // Start serving straight away. The first catalogue pull runs in the
   // background: with several suppliers it can take minutes, and the API
