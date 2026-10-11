@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/auth');
 const { sendSms, isConfigured: smsConfigured, normalizePhone } = require('../services/smsClient');
 const { sendEmail } = require('../services/emailClient');
 const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
+const { getCurrentRow, recordAcceptance } = require('../services/termsService');
 
 const router = express.Router();
 
@@ -56,9 +57,8 @@ async function issueEmailCode(userId, email) {
   return sendEmail(email, `Підтвердження email — ${SHOP_NAME}`, `Ваш код підтвердження email: ${code}\n\nКод дійсний 15 хвилин.`);
 }
 
-// Редакція Правил та умов (frontend/terms.html), яку приймає користувач при реєстрації. Змінили текст правил —
-// змініть тут (або змінною TERMS_VERSION на Render) і в terms.html, щоб у базі було видно, яку редакцію хто прийняв.
-const TERMS_VERSION = process.env.TERMS_VERSION || '2026-10-09';
+// Правила та умови тепер зберігаються в базі (terms_versions) і редагуються в адмін-кабінеті;
+// при реєстрації фіксується згода з чинною на цей момент редакцією.
 
 // POST /api/auth/register — { name, email, phone, password, acceptTerms: true }. Phone is
 // required. Якщо SMS-шлюз налаштований, акаунт створюється, але токен
@@ -86,14 +86,18 @@ router.post('/register', async (req, res) => {
       return res.status(409).json({ error: 'Користувач з таким email вже зареєстрований' });
     }
 
+    const currentTerms = await getCurrentRow();
+    if (!currentTerms) return res.status(503).json({ error: 'Правила та умови тимчасово недоступні. Спробуйте пізніше.' });
+
     const passwordHash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
       `INSERT INTO users (name, email, phone, password_hash, terms_accepted_at, terms_version) VALUES ($1, $2, $3, $4, now(), $5)
        RETURNING id, name, email, phone`,
-      [name, email.toLowerCase(), phone, passwordHash, TERMS_VERSION]
+      [name, email.toLowerCase(), phone, passwordHash, currentTerms.version]
     );
 
     const user = rows[0];
+    await recordAcceptance(user.id, currentTerms, req).catch((err) => console.error('[register] журнал згоди:', err.message));
 
     issueEmailCode(user.id, user.email).catch((err) => console.error('[register] email code failed:', err.message));
 

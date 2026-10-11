@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const { pool } = require('../db');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
+const { requireTermsAccepted } = require('../middleware/termsAccepted');
 
 const router = express.Router();
 
@@ -102,7 +103,7 @@ router.get('/product/:productId', optionalAuth, async (req, res) => {
 // POST /api/reviews/product/:productId — { rating: 1..5, text? }
 // Створює відгук або оновлює власний (один на товар). Відгук покупця публікується одразу,
 // інші чекають модерації. Приховані адміном відгуки редагуванням не повертаються у видачу.
-router.post('/product/:productId', requireAuth, async (req, res) => {
+router.post('/product/:productId', requireAuth, requireTermsAccepted, async (req, res) => {
   try {
     const productId = Number(req.params.productId);
     if (!Number.isInteger(productId) || productId <= 0) return res.status(400).json({ error: 'Некоректний товар' });

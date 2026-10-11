@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/auth');
 const { sendSms } = require('../services/smsClient');
 const { sendEmail } = require('../services/emailClient');
 const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
+const { getCurrentRow, getRowByVersion, withHtml, getTermsStatus, recordAcceptance } = require('../services/termsService');
 
 const router = express.Router();
 router.use(requireAuth); // every account route requires login
@@ -368,6 +369,53 @@ router.delete('/views/:productId', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося видалити' });
+  }
+});
+
+// GET /api/account/terms — правила для кабінету покупця:
+//   needsAcceptance — чи треба прийняти (нова редакція або ще не приймав);
+//   current  — чинна редакція (з HTML);
+//   accepted — редакція, яку покупець прийняв, і коли (html віддається, лише якщо вона
+//              відрізняється від чинної — інакше клієнт бере html із current).
+router.get('/terms', async (req, res) => {
+  try {
+    const [status, currentRow] = await Promise.all([getTermsStatus(req.user.id), getCurrentRow()]);
+    if (!status || !currentRow) return res.status(404).json({ error: 'Правила не знайдено' });
+
+    const current = withHtml(currentRow);
+    let accepted = null;
+    if (status.acceptedVersion) {
+      const same = status.acceptedVersion === currentRow.version;
+      const row = same ? currentRow : await getRowByVersion(status.acceptedVersion);
+      if (row) {
+        accepted = same
+          ? { version: row.version, title: row.title, effective_date: row.effective_date, accepted_at: status.acceptedAt }
+          : { ...withHtml(row), accepted_at: status.acceptedAt };
+      }
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ needsAcceptance: status.needsAcceptance, current, accepted });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося завантажити правила' });
+  }
+});
+
+// POST /api/account/terms/accept — { version }. Покупець приймає чинну редакцію.
+// Версія в запиті має збігатися з чинною: якщо правила змінились, поки вікно було
+// відкрите, відповідаємо 409, щоб людина прочитала свіжий текст, а не прийняла наосліп.
+router.post('/terms/accept', async (req, res) => {
+  try {
+    const currentRow = await getCurrentRow();
+    if (!currentRow) return res.status(404).json({ error: 'Правила не знайдено' });
+    if (String(req.body.version || '') !== currentRow.version) {
+      return res.status(409).json({ error: 'Правила було оновлено. Прочитайте актуальну редакцію.', stale: true });
+    }
+    await recordAcceptance(req.user.id, currentRow, req);
+    res.json({ ok: true, version: currentRow.version });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося зберегти згоду' });
   }
 });
 

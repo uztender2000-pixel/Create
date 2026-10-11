@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { pool } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { requireTermsAccepted } = require('../middleware/termsAccepted');
 const { dispatchGroup } = require('../services/orderDispatcher');
 
 const router = express.Router();
@@ -95,7 +96,7 @@ router.delete('/:productId', async (req, res) => {
 // per product, all sharing a group_id, each tagged with its supplier.
 // The dispatcher then splits that group by supplier and submits each
 // share separately.
-router.post('/checkout', async (req, res) => {
+router.post('/checkout', requireTermsAccepted, async (req, res) => {
   const client = await pool.connect();
   let groupId;
   try {
