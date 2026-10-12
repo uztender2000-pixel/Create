@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
+const { getToken } = require('../services/security');
 
 // Журнал дій в адмінці: хто, коли, що змінив і з яким результатом. Пишуться всі запити, що
 // змінюють дані (POST/PUT/PATCH/DELETE), а також усі спроби входу. Паролі, коди й токени
@@ -20,7 +21,10 @@ function sanitize(value, depth = 0) {
 }
 
 function auditLog(req, res, next) {
-  const isLogin = /^\/auth\/login/.test(req.path);
+  // Шлях беремо ТУТ: після обробки вкладеними роутерами req.path вже вкорочений (напр. '/login').
+  const relPath = req.path;
+  const fullPath = req.originalUrl.split('?')[0];
+  const isLogin = /^\/auth\/login/.test(relPath);
   const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
   if (!mutating && !isLogin) return next();
 
@@ -28,9 +32,9 @@ function auditLog(req, res, next) {
     try {
       let adminId = null;
       let email = null;
-      const h = req.headers.authorization || '';
-      if (h.startsWith('Bearer ')) {
-        try { adminId = jwt.verify(h.slice(7), process.env.ADMIN_JWT_SECRET).adminId || null; } catch (e) { /* без сесії */ }
+      const t = getToken(req, 'admin');
+      if (t) {
+        try { adminId = jwt.verify(t, process.env.ADMIN_JWT_SECRET).adminId || null; } catch (e) { /* без сесії */ }
       }
       if (adminId) {
         const r = await pool.query('SELECT email FROM admin_users WHERE id = $1', [adminId]);
@@ -38,11 +42,11 @@ function auditLog(req, res, next) {
       } else if (isLogin && req.body && typeof req.body.email === 'string') {
         email = req.body.email.toLowerCase().slice(0, 200);   // спроба входу: email з форми
       }
-      const body = SKIP_BODY.test(req.path) ? null : JSON.stringify(sanitize(req.body || {})).slice(0, 4000);
+      const body = SKIP_BODY.test(relPath) ? null : JSON.stringify(sanitize(req.body || {})).slice(0, 4000);
       await pool.query(
         `INSERT INTO admin_audit_log (admin_id, admin_email, method, path, status, ip, user_agent, detail)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
-        [adminId, email, req.method, `/api/admin${req.path}`.slice(0, 300), res.statusCode,
+        [adminId, email, req.method, fullPath.slice(0, 300), res.statusCode,
           String(req.ip || '').slice(0, 100), String(req.headers['user-agent'] || '').slice(0, 300), body]
       );
     } catch (err) {

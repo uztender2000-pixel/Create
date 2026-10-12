@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
+const { getToken } = require('../services/security');
 
 // Токен покупця: { userId, email, tv }. tv — «версія токенів» користувача (users.token_version).
 // Зміна пароля або «Вийти на всіх пристроях» збільшує її, і всі раніше видані токени стають
@@ -20,8 +21,7 @@ async function resolveUser(token) {
 // req.user = { id, email } if valid. Use on any route that needs to know
 // who's calling (cart, checkout, profile).
 async function requireAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const token = getToken(req, 'user');   // заголовок Authorization або httpOnly-cookie
 
   if (!token) {
     return res.status(401).json({ error: 'Потрібна авторизація' });
@@ -40,8 +40,7 @@ async function requireAuth(req, res, next) {
 // carries on as a guest. For public endpoints that behave better when they
 // know who's asking — e.g. homepage recommendations.
 async function optionalAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const token = getToken(req, 'user');
   if (token) {
     try {
       req.user = await resolveUser(token);

@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { pool } = require('../db');
+const { getToken } = require('../services/security');
 
 // Чи обов'язкова двофакторка для цього акаунта. Керується змінною ADMIN_REQUIRE_MFA:
 //   (за замовчуванням) — для ролі «admin»;  'all' — для всіх;  'false' — вимкнено.
@@ -21,8 +22,7 @@ function mfaRequiredFor(admin) {
 // «Вийти всюди» чи скидання 2FA (admin_users.token_version).
 function makeAdminAuth(enforceMfa) {
   return async function adminAuth(req, res, next) {
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    const token = getToken(req, 'admin');   // заголовок Authorization або httpOnly-cookie
     if (!token) return res.status(401).json({ error: 'Потрібна авторизація' });
 
     try {
