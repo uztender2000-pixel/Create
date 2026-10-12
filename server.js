@@ -38,6 +38,7 @@ const adminOwnerRouter = require('./routes/adminOwner');
 const { ensureInitialTerms } = require('./services/termsService');
 const adminAuditRouter = require('./routes/adminAudit');
 const { auditLog, purgeOldAuditLog } = require('./middleware/auditLog');
+const { allowedOrigins, cookieSessionsEnabled, csrfGuard } = require('./services/security');
 
 const app = express();
 
@@ -54,13 +55,17 @@ app.use(helmet({
 
 // FRONTEND_ORIGIN — адреса(и) фронтенду через кому, напр. https://shop.com,https://www.shop.com.
 // Без неї API відкрите для запитів з БУДЬ-ЯКОГО сайту: обов'язково задайте її на Render.
-const allowedOrigins = String(process.env.FRONTEND_ORIGIN || '').split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean);
 if (!allowedOrigins.length) {
   console.warn('[security] ⚠ FRONTEND_ORIGIN не задано — CORS дозволяє запити з будь-якого сайту. Задайте адресу фронтенду!');
 }
+if (String(process.env.COOKIE_SESSIONS || '').toLowerCase() === 'true' && !allowedOrigins.length) {
+  console.warn('[security] ⚠ COOKIE_SESSIONS=true проігноровано: потрібна FRONTEND_ORIGIN (cookie не можна відкривати для всіх сайтів).');
+}
+if (cookieSessionsEnabled()) console.log('[security] Cookie-сесії УВІМКНЕНО (httpOnly, SameSite=' + (process.env.COOKIE_SAMESITE || 'Lax') + ').');
 app.use(cors(allowedOrigins.length
-  ? { origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)) }
+  ? { origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)), credentials: true }
   : {}));
+app.use(csrfGuard);   // захист від підробки запитів для сесій у cookie
 
 app.use(express.json({ limit: '1mb' }));
 
