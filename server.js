@@ -33,6 +33,7 @@ const { SHOP_NAME } = require('./services/brand');
 const adminSectionTranslationsRouter = require('./routes/adminSectionTranslations');
 const webhooksMydropRouter = require('./routes/webhooksMydrop');
 const termsRouter = require('./routes/terms');
+const sessionRouter = require('./routes/session');
 const adminTermsRouter = require('./routes/adminTerms');
 const adminOwnerRouter = require('./routes/adminOwner');
 const { ensureInitialTerms } = require('./services/termsService');
@@ -61,7 +62,10 @@ if (!allowedOrigins.length) {
 if (String(process.env.COOKIE_SESSIONS || '').toLowerCase() === 'true' && !allowedOrigins.length) {
   console.warn('[security] ⚠ COOKIE_SESSIONS=true проігноровано: потрібна FRONTEND_ORIGIN (cookie не можна відкривати для всіх сайтів).');
 }
-if (cookieSessionsEnabled()) console.log('[security] Cookie-сесії УВІМКНЕНО (httpOnly, SameSite=' + (process.env.COOKIE_SAMESITE || 'Lax') + ').');
+if (cookieSessionsEnabled()) console.log('[security] Cookie-сесії УВІМКНЕНО (httpOnly, SameSite=' + (process.env.COOKIE_SAMESITE || 'Lax') + '); режим обирає браузер, запасний — токен.');
+if (process.env.COOKIE_SAMESITE === 'None' && String(process.env.COOKIE_SECURE || 'true').toLowerCase() === 'false') {
+  console.warn('[security] ⚠ SameSite=None потребує HTTPS (Secure) — COOKIE_SECURE=false не спрацює в браузерах.');
+}
 app.use(cors(allowedOrigins.length
   ? { origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)), credentials: true }
   : {}));
@@ -122,6 +126,7 @@ app.use('/api/assistant', assistantRouter);
 app.use('/api/admin/section-translations', adminSectionTranslationsRouter);
 app.use('/api/webhooks/mydrop', webhooksMydropRouter);
 app.use('/api/terms', termsRouter);
+app.use('/api/session', sessionRouter);
 app.use('/api/admin/terms', adminTermsRouter);
 app.use('/api/admin/owner', adminOwnerRouter);
 app.use('/api/admin/audit', adminAuditRouter);
