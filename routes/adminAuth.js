@@ -8,6 +8,7 @@ const { requireAdminAuthBasic, mfaRequiredFor } = require('../middleware/adminAu
 const { validatePassword } = require('../services/passwordPolicy');
 const totp = require('../services/totp');
 const { SHOP_NAME } = require('../services/brand');
+const { sessionBody, clearSession } = require('../services/security');
 
 const router = express.Router();
 
@@ -57,7 +58,7 @@ async function registerFailure(adminId) {
 
 async function completeLogin(res, admin) {
   await pool.query('UPDATE admin_users SET failed_logins = 0, locked_until = NULL WHERE id = $1', [admin.id]);
-  res.json({ admin: publicAdmin(admin), token: signAdminToken(admin) });
+  res.json(sessionBody(res, 'admin', signAdminToken(admin), { admin: publicAdmin(admin) }));
 }
 
 // POST /api/admin/auth/login — { email, password }
@@ -137,6 +138,12 @@ router.post('/login/mfa', loginLimiter, async (req, res) => {
 
 // Далі — доступно і акаунту, який ще мусить налаштувати 2FA (requireAdminAuthBasic).
 
+// POST /api/admin/auth/logout — прибирає httpOnly-cookie сесії.
+router.post('/logout', (req, res) => {
+  clearSession(res, 'admin');
+  res.json({ ok: true });
+});
+
 // GET /api/admin/auth/me
 router.get('/me', requireAdminAuthBasic, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM admin_users WHERE id = $1', [req.admin.id]);
@@ -164,7 +171,7 @@ router.post('/change-password', requireAdminAuthBasic, async (req, res) => {
       'UPDATE admin_users SET password_hash = $1, must_change_password = false, token_version = token_version + 1 WHERE id = $2 RETURNING *',
       [newHash, req.admin.id]
     );
-    res.json({ ok: true, token: signAdminToken(upd.rows[0]) });
+    res.json(sessionBody(res, 'admin', signAdminToken(upd.rows[0]), { ok: true }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося змінити пароль' });
@@ -174,7 +181,7 @@ router.post('/change-password', requireAdminAuthBasic, async (req, res) => {
 // POST /api/admin/auth/logout-all — завершує ВСІ сесії цього адміна, крім поточної.
 router.post('/logout-all', requireAdminAuthBasic, async (req, res) => {
   const upd = await pool.query('UPDATE admin_users SET token_version = token_version + 1 WHERE id = $1 RETURNING *', [req.admin.id]);
-  res.json({ ok: true, token: signAdminToken(upd.rows[0]) });
+  res.json(sessionBody(res, 'admin', signAdminToken(upd.rows[0]), { ok: true }));
 });
 
 // ---------- Двофакторна автентифікація ----------

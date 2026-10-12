@@ -9,6 +9,8 @@ const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
 const { getCurrentRow, recordAcceptance } = require('../services/termsService');
 const { validatePassword } = require('../services/passwordPolicy');
 const crypto = require('crypto');
+const { sessionBody, clearSession } = require('../services/security');
+const { requireCaptcha } = require('../middleware/captcha');
 
 const router = express.Router();
 
@@ -72,7 +74,7 @@ async function issueEmailCode(userId, email) {
 // required. Якщо SMS-шлюз налаштований, акаунт створюється, але токен
 // видається лише після підтвердження телефону кодом із SMS
 // (POST /verify-login-phone). Без налаштованого SMS — як раніше.
-router.post('/register', async (req, res) => {
+router.post('/register', requireCaptcha, async (req, res) => {
   try {
     const { name, email, phone, password, acceptTerms } = req.body;
     if (!name || !email || !password || !phone) {
@@ -125,7 +127,7 @@ router.post('/register', async (req, res) => {
     }
 
     issuePhoneCode(user.id, user.phone).catch((err) => console.error('[register] phone code failed:', err.message));
-    res.status(201).json({ user, token: signToken(user) });
+    res.status(201).json(sessionBody(res, 'user', signToken(user), { user }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося зареєструватись' });
@@ -135,7 +137,7 @@ router.post('/register', async (req, res) => {
 // POST /api/auth/login — { email, password }. Якщо SMS налаштовано, а номер
 // ще не підтверджений — токен не видається: надсилаємо код і відповідаємо
 // 403 { needsVerification: true }.
-router.post('/login', async (req, res) => {
+router.post('/login', requireCaptcha, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -166,7 +168,7 @@ router.post('/login', async (req, res) => {
     }
 
     const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: user.phone_verified };
-    res.json({ user: publicUser, token: signToken(publicUser, user.token_version) });
+    res.json(sessionBody(res, 'user', signToken(publicUser, user.token_version), { user: publicUser }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося увійти' });
@@ -222,7 +224,7 @@ router.post('/verify-login-phone', async (req, res) => {
     }
 
     const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: true };
-    res.json({ user: publicUser, token: signToken(publicUser, user.token_version) });
+    res.json(sessionBody(res, 'user', signToken(publicUser, user.token_version), { user: publicUser }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося підтвердити телефон' });
@@ -230,6 +232,12 @@ router.post('/verify-login-phone', async (req, res) => {
 });
 
 // GET /api/auth/me — returns the logged-in user (for restoring session on page load)
+// POST /api/auth/logout — прибирає httpOnly-cookie сесії (у режимі з токеном нічого не робить).
+router.post('/logout', (req, res) => {
+  clearSession(res, 'user');
+  res.json({ ok: true });
+});
+
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -342,7 +350,7 @@ router.post('/verify-email', requireAuth, async (req, res) => {
 // verification codes above, just stored in its own column so a pending
 // "verify my email" code and a pending "reset my password" code never
 // clash with each other.
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', requireCaptcha, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Email обов\'язковий' });

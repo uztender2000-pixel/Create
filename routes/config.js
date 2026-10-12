@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { cookieSessionsEnabled } = require('../services/security');
 
 // GET /api/config — public, non-sensitive site config for the frontend
 // (e.g. a link to join the customer Telegram bot for order updates).
@@ -12,6 +13,9 @@ router.get('/', (req, res) => {
     shopName: process.env.SHOP_NAME || 'В Хату.UA',
     // Віджет чату з ШІ-помічником показуємо лише тоді, коли на сервері задано ключ Anthropic API.
     assistantEnabled: Boolean(process.env.ANTHROPIC_API_KEY),
+    // Фронтенд за цим прапорцем вирішує, чи працювати з httpOnly-cookie (і слати credentials) та чи показувати капчу.
+    cookieSessions: cookieSessionsEnabled(),
+    turnstileSiteKey: process.env.TURNSTILE_SECRET ? (process.env.TURNSTILE_SITE_KEY || null) : null,
   });
 });
 

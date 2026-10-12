@@ -9,6 +9,7 @@ const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
 const { getCurrentRow, getRowByVersion, withHtml, getTermsStatus, recordAcceptance } = require('../services/termsService');
 const { validatePassword } = require('../services/passwordPolicy');
 const jwt = require('jsonwebtoken');
+const { sessionBody } = require('../services/security');
 
 const router = express.Router();
 router.use(requireAuth); // every account route requires login
@@ -100,7 +101,7 @@ function signUserToken(u) {
 router.post('/logout-all', async (req, res) => {
   try {
     const upd = await pool.query('UPDATE users SET token_version = token_version + 1 WHERE id = $1 RETURNING id, email, token_version', [req.user.id]);
-    res.json({ ok: true, token: signUserToken(upd.rows[0]) });
+    res.json(sessionBody(res, 'user', signUserToken(upd.rows[0]), { ok: true }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося завершити сесії' });
@@ -124,7 +125,7 @@ router.patch('/password', async (req, res) => {
     // Усі інші пристрої розлогінюються; цьому віддаємо свіжий токен.
     const newHash = await bcrypt.hash(newPassword, 12);
     const upd = await pool.query('UPDATE users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2 RETURNING id, email, token_version', [newHash, req.user.id]);
-    res.json({ ok: true, token: signUserToken(upd.rows[0]) });
+    res.json(sessionBody(res, 'user', signUserToken(upd.rows[0]), { ok: true }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося змінити пароль' });

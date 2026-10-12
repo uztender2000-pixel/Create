@@ -2,7 +2,9 @@ const express = require('express');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
+const { Pool } = require('pg');
 const { pool } = require('../db');
+const totp = require('../services/totp');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -38,7 +40,26 @@ function requireOwner(req, res, next) {
   next();
 }
 
+// SQL_CONSOLE=off повністю вимикає консоль (рекомендовано в продакшені, коли вона не потрібна щодня).
+router.use((req, res, next) => {
+  if (String(process.env.SQL_CONSOLE || '').toLowerCase() === 'off') return res.status(403).json({ error: 'SQL-консоль вимкнено на сервері (SQL_CONSOLE=off)' });
+  next();
+});
 router.use(requireAdminAuth, requireOwner);
+
+// Окреме підключення до БД з правами ЛИШЕ НА ЧИТАННЯ для режиму читання (DATABASE_URL_READONLY).
+// Навіть якби хтось обійшов READ ONLY-транзакцію, сама роль БД не має права щось змінити.
+// Створення ролі (виконати від імені власника БД; підставте назву бази та пароль):
+//   CREATE ROLE shop_readonly LOGIN PASSWORD '...';
+//   GRANT CONNECT ON DATABASE <база> TO shop_readonly;  GRANT USAGE ON SCHEMA public TO shop_readonly;
+//   GRANT SELECT ON ALL TABLES IN SCHEMA public TO shop_readonly;
+//   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO shop_readonly;
+//   -- не віддаємо секрети навіть для читання:
+//   REVOKE SELECT ON admin_users FROM shop_readonly;
+//   GRANT SELECT (id, name, email, role, permissions, active, created_at) ON admin_users TO shop_readonly;
+const readPool = process.env.DATABASE_URL_READONLY
+  ? new Pool({ connectionString: process.env.DATABASE_URL_READONLY, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false, max: 3 })
+  : pool;
 
 // Password guessing protection: 10 write attempts per 15 minutes per admin.
 const writeLimiter = rateLimit({
@@ -78,7 +99,7 @@ async function logWrite(admin, query, outcome, detail) {
 }
 
 async function runRead(query) {
-  const client = await pool.connect();
+  const client = await readPool.connect();
   try {
     await client.query('BEGIN READ ONLY');
     await client.query(`SET LOCAL statement_timeout = ${READ_TIMEOUT_MS}`);
@@ -141,11 +162,23 @@ router.post('/', (req, res, next) => {
       return res.status(400).json({ error: 'Для зміни даних введіть пароль адміністратора', code: 'password_required' });
     }
 
-    const { rows } = await pool.query('SELECT password_hash FROM admin_users WHERE id = $1', [req.admin.id]);
+    const { rows } = await pool.query('SELECT password_hash, mfa_enabled, mfa_secret, mfa_last_step FROM admin_users WHERE id = $1', [req.admin.id]);
     const ok = rows.length && (await bcrypt.compare(String(password), rows[0].password_hash));
     if (!ok) {
       await logWrite(req.admin, query, 'bad_password', 'Невірний пароль');
       return res.status(403).json({ error: 'Невірний пароль', code: 'bad_password' });
+    }
+
+    // Другий фактор на КОЖНУ зміну даних: украдена сесія + підібраний пароль все одно не дозволять
+    // нічого змінити без коду з телефону. Код діє один раз.
+    if (rows[0].mfa_enabled) {
+      const step = totp.verifyTotp(totp.decryptSecret(rows[0].mfa_secret), req.body.code, rows[0].mfa_last_step);
+      const used = step !== null && (await pool.query(
+        'UPDATE admin_users SET mfa_last_step = $2 WHERE id = $1 AND (mfa_last_step IS NULL OR mfa_last_step < $2)', [req.admin.id, step])).rowCount === 1;
+      if (!used) {
+        await logWrite(req.admin, query, 'bad_code', 'Невірний код 2FA');
+        return res.status(403).json({ error: 'Невірний або вже використаний код 2FA. Дочекайтесь нового коду в застосунку', code: 'bad_code' });
+      }
     }
 
     try {
