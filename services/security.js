@@ -4,10 +4,18 @@
 // Cookie-сесії (COOKIE_SESSIONS=true) переносять токен із localStorage (звідки його може
 // вкрасти будь-який шкідливий скрипт) в httpOnly-cookie, недоступну для JavaScript.
 //
-// УВАГА: працює надійно, лише коли фронтенд і API на одному «сайті» (одному домені верхнього
-// рівня), напр. shop.ua і api.shop.ua. Якщо вони на різних доменах (frontend.com і
-// xxx.onrender.com), Safari та частина браузерів блокують сторонні cookie — вхід ламається.
-// Тоді залишайте COOKIE_SESSIONS вимкненим (токен у заголовку, як і раніше).
+// Режим сесії обирає САМ БРАУЗЕР, а не сервер:
+//  • фронтенд перевіряє, чи доходять cookie від API (GET /api/session/probe → /check);
+//  • якщо так — шле заголовок X-Session-Mode: cookie, і сервер видає httpOnly-cookie без токена
+//    у відповіді;
+//  • якщо ні (Safari/iOS та інші браузери, що блокують сторонні cookie) — сесія працює через токен
+//    у заголовку, як і раніше. Вхід не ламається ніде.
+//
+// Фронтенд і API на ОДНОМУ сайті (shop.ua + api.shop.ua): COOKIE_SAMESITE=Lax (за замовчуванням) —
+// cookie працюють в усіх браузерах.
+// На РІЗНИХ сайтах (frontend.com + xxx.onrender.com): COOKIE_SAMESITE=None. Cookie ставляться з
+// атрибутом Partitioned (CHIPS) і працюють у Chrome/Edge навіть при блокуванні сторонніх cookie;
+// там, де їх блокують повністю (Safari), автоматично діє токен.
 // ---------------------------------------------------------------------------
 
 const allowedOrigins = String(process.env.FRONTEND_ORIGIN || '')
@@ -20,8 +28,9 @@ function cookieSessionsEnabled() {
 
 const SECURE = String(process.env.COOKIE_SECURE || 'true').toLowerCase() !== 'false';
 const SAMESITE = ['Strict', 'Lax', 'None'].includes(process.env.COOKIE_SAMESITE) ? process.env.COOKIE_SAMESITE : 'Lax';
-const PREFIX = SECURE && SAMESITE !== 'None' ? '__Host-' : '';   // __Host-: cookie лише для цього хоста, лише по HTTPS
-const NAMES = { user: `${PREFIX}shop_sid`, admin: `${PREFIX}shop_asid` };
+const PARTITIONED = SAMESITE === 'None' && String(process.env.COOKIE_PARTITIONED || 'true').toLowerCase() !== 'false';
+const PREFIX = SECURE ? '__Host-' : '';   // __Host-: cookie лише для цього хоста, лише по HTTPS
+const NAMES = { user: `${PREFIX}shop_sid`, admin: `${PREFIX}shop_asid`, probe: `${PREFIX}shop_probe` };
 const MAX_AGE = { user: 14 * 24 * 3600 * 1000, admin: 12 * 3600 * 1000 };
 
 function parseCookies(header) {
@@ -46,6 +55,7 @@ function getToken(req, kind) {
 function cookieAttrs(maxAgeMs) {
   const a = ['Path=/', 'HttpOnly', `SameSite=${SAMESITE}`];
   if (SECURE || SAMESITE === 'None') a.push('Secure');
+  if (PARTITIONED) a.push('Partitioned');   // CHIPS: cookie «прив'язана» до сайту фронтенду і працює без сторонніх cookie
   if (maxAgeMs != null) a.push(`Max-Age=${Math.floor(maxAgeMs / 1000)}`);
   return a.join('; ');
 }
@@ -55,12 +65,26 @@ function appendCookie(res, value) {
   res.setHeader('Set-Cookie', prev ? [].concat(prev, value) : value);
 }
 
-// Повертає тіло відповіді: у cookie-режимі токен кладемо в cookie (а не у відповідь),
-// інакше — у поле token, як і раніше.
-function sessionBody(res, kind, token, extra = {}) {
-  if (!cookieSessionsEnabled()) return { ...extra, token };
+// Браузер сам повідомляє, що cookie в ньому працюють (після успішної перевірки probe/check).
+function clientWantsCookie(req) {
+  return String(req.headers['x-session-mode'] || '').toLowerCase() === 'cookie';
+}
+
+// Повертає тіло відповіді: якщо cookie доступні і браузер їх підтримує — токен кладемо в
+// httpOnly-cookie (а не у відповідь), інакше — у поле token, як і раніше.
+function sessionBody(req, res, kind, token, extra = {}) {
+  if (!cookieSessionsEnabled() || !clientWantsCookie(req)) return { ...extra, token };
   appendCookie(res, `${NAMES[kind]}=${encodeURIComponent(token)}; ${cookieAttrs(MAX_AGE[kind])}`);
   return { ...extra, cookieSession: true };
+}
+
+// Перевірка «чи доходять cookie від API до цього браузера»: probe ставить тестову cookie,
+// check каже, чи повернув її браузер.
+function setProbeCookie(res) {
+  appendCookie(res, `${NAMES.probe}=1; ${cookieAttrs(300 * 1000)}`);
+}
+function probeSeen(req) {
+  return Boolean(parseCookies(req.headers.cookie)[NAMES.probe]);
 }
 
 function clearSession(res, kind) {
@@ -88,4 +112,5 @@ function csrfGuard(req, res, next) {
 
 module.exports = {
   allowedOrigins, cookieSessionsEnabled, NAMES, parseCookies, getToken, sessionBody, clearSession, csrfGuard,
+  setProbeCookie, probeSeen,
 };
