@@ -127,7 +127,7 @@ router.post('/register', requireCaptcha, async (req, res) => {
     }
 
     issuePhoneCode(user.id, user.phone).catch((err) => console.error('[register] phone code failed:', err.message));
-    res.status(201).json(sessionBody(res, 'user', signToken(user), { user }));
+    res.status(201).json(sessionBody(req, res, 'user', signToken(user), { user }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося зареєструватись' });
@@ -168,7 +168,7 @@ router.post('/login', requireCaptcha, async (req, res) => {
     }
 
     const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: user.phone_verified };
-    res.json(sessionBody(res, 'user', signToken(publicUser, user.token_version), { user: publicUser }));
+    res.json(sessionBody(req, res, 'user', signToken(publicUser, user.token_version), { user: publicUser }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося увійти' });
@@ -224,7 +224,7 @@ router.post('/verify-login-phone', async (req, res) => {
     }
 
     const publicUser = { id: user.id, name: user.name, email: user.email, phone: user.phone, phone_verified: true };
-    res.json(sessionBody(res, 'user', signToken(publicUser, user.token_version), { user: publicUser }));
+    res.json(sessionBody(req, res, 'user', signToken(publicUser, user.token_version), { user: publicUser }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося підтвердити телефон' });

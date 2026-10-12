@@ -56,9 +56,9 @@ async function registerFailure(adminId) {
   );
 }
 
-async function completeLogin(res, admin) {
+async function completeLogin(req, res, admin) {
   await pool.query('UPDATE admin_users SET failed_logins = 0, locked_until = NULL WHERE id = $1', [admin.id]);
-  res.json(sessionBody(res, 'admin', signAdminToken(admin), { admin: publicAdmin(admin) }));
+  res.json(sessionBody(req, res, 'admin', signAdminToken(admin), { admin: publicAdmin(admin) }));
 }
 
 // POST /api/admin/auth/login — { email, password }
@@ -84,7 +84,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 
     if (admin.mfa_enabled) return res.json({ mfaRequired: true, mfaToken: signMfaToken(admin) });
-    await completeLogin(res, admin);
+    await completeLogin(req, res, admin);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося увійти' });
@@ -129,7 +129,7 @@ router.post('/login/mfa', loginLimiter, async (req, res) => {
       await registerFailure(admin.id);
       return res.status(401).json({ error: 'Невірний код' });
     }
-    await completeLogin(res, admin);
+    await completeLogin(req, res, admin);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося підтвердити код' });
@@ -171,7 +171,7 @@ router.post('/change-password', requireAdminAuthBasic, async (req, res) => {
       'UPDATE admin_users SET password_hash = $1, must_change_password = false, token_version = token_version + 1 WHERE id = $2 RETURNING *',
       [newHash, req.admin.id]
     );
-    res.json(sessionBody(res, 'admin', signAdminToken(upd.rows[0]), { ok: true }));
+    res.json(sessionBody(req, res, 'admin', signAdminToken(upd.rows[0]), { ok: true }));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося змінити пароль' });
@@ -181,7 +181,7 @@ router.post('/change-password', requireAdminAuthBasic, async (req, res) => {
 // POST /api/admin/auth/logout-all — завершує ВСІ сесії цього адміна, крім поточної.
 router.post('/logout-all', requireAdminAuthBasic, async (req, res) => {
   const upd = await pool.query('UPDATE admin_users SET token_version = token_version + 1 WHERE id = $1 RETURNING *', [req.admin.id]);
-  res.json(sessionBody(res, 'admin', signAdminToken(upd.rows[0]), { ok: true }));
+  res.json(sessionBody(req, res, 'admin', signAdminToken(upd.rows[0]), { ok: true }));
 });
 
 // ---------- Двофакторна автентифікація ----------
