@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"     # щопонеділка: повторна перевірка вразливостей, навіть без змін у коді
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Встановлення залежностей
+        run: npm install --no-audit --no-fund
+      - name: Перевірка синтаксису
+        run: |
+          find . -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check
+      - name: Автотести
+        run: npm test
+      - name: Перевірка вразливостей (high і вище)
+        run: npm audit --omit=dev --audit-level=high
