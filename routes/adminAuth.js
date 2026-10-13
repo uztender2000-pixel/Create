@@ -8,6 +8,9 @@ const { requireAdminAuthBasic, mfaRequiredFor } = require('../middleware/adminAu
 const { validatePassword } = require('../services/passwordPolicy');
 const totp = require('../services/totp');
 const { SHOP_NAME } = require('../services/brand');
+const crypto = require('crypto');
+const { sendAlert } = require('../services/alerts');
+const { sendEmail } = require('../services/emailClient');
 const { sessionBody, clearSession } = require('../services/security');
 
 const router = express.Router();
@@ -46,18 +49,55 @@ function lockedResponse(res, until) {
   return res.status(423).json({ error: `Забагато невдалих спроб. Вхід заблоковано до ${t}.`, lockedUntil: until });
 }
 
-async function registerFailure(adminId) {
-  await pool.query(
+// Коротко про браузер/систему з User-Agent — для листів і списку пристроїв.
+function describeAgent(ua) {
+  const s = String(ua || '');
+  const browser = /Edg\//.test(s) ? 'Edge' : /OPR\//.test(s) ? 'Opera' : /Firefox\//.test(s) ? 'Firefox' : /Chrome\//.test(s) ? 'Chrome' : /Safari\//.test(s) ? 'Safari' : 'Невідомий браузер';
+  const os = /Windows/.test(s) ? 'Windows' : /Android/.test(s) ? 'Android' : /iPhone|iPad|iOS/.test(s) ? 'iOS' : /Mac OS X|Macintosh/.test(s) ? 'macOS' : /Linux/.test(s) ? 'Linux' : '';
+  return os ? `${browser} · ${os}` : browser;
+}
+
+// Після 5 невдалих спроб акаунт блокується — про це одразу повідомляємо і власника акаунта, і канали сповіщень.
+async function registerFailure(adminId, req) {
+  const { rows } = await pool.query(
     `UPDATE admin_users SET
         locked_until = CASE WHEN failed_logins + 1 >= $2 THEN now() + make_interval(mins => $3) ELSE locked_until END,
         failed_logins = CASE WHEN failed_logins + 1 >= $2 THEN 0 ELSE failed_logins + 1 END
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING email, failed_logins, locked_until`,
     [adminId, MAX_FAILS, LOCK_MINUTES]
   );
+  const a = rows[0];
+  if (a && a.failed_logins === 0 && a.locked_until && new Date(a.locked_until) > new Date()) {
+    const text = `Обліковий запис ${a.email} заблоковано на ${LOCK_MINUTES} хв після ${MAX_FAILS} невдалих спроб входу.\nIP: ${req && req.ip}\nБраузер: ${describeAgent(req && req.headers['user-agent'])}\n\nЯкщо це були не ви — хтось підбирає пароль. Перевірте «Журнал дій» й за потреби змініть пароль.`;
+    sendAlert({ title: 'Блокування акаунта адміністратора', text, dedupeKey: `lock-${adminId}`, dedupeMinutes: LOCK_MINUTES });
+  }
+}
+
+// Запам'ятовує пристрій (за User-Agent). Повертає true, якщо це НОВИЙ пристрій для акаунта, який уже мав
+// відомі пристрої (найперший вхід після оновлення нікого не лякає).
+async function touchDevice(admin, req) {
+  const ua = String(req.headers['user-agent'] || '').slice(0, 300);
+  const fp = crypto.createHash('sha256').update(ua).digest('hex');
+  const ip = String(req.ip || '').slice(0, 100);
+  const known = await pool.query('SELECT COUNT(*)::int AS n FROM admin_devices WHERE admin_id = $1', [admin.id]);
+  const up = await pool.query(
+    `INSERT INTO admin_devices (admin_id, fingerprint, user_agent, first_ip, last_ip) VALUES ($1, $2, $3, $4, $4)
+     ON CONFLICT (admin_id, fingerprint) DO UPDATE SET last_seen = now(), last_ip = EXCLUDED.last_ip
+     RETURNING (xmax = 0) AS inserted`, [admin.id, fp, ua, ip]);
+  return up.rows[0].inserted && known.rows[0].n > 0;
 }
 
 async function completeLogin(req, res, admin) {
   await pool.query('UPDATE admin_users SET failed_logins = 0, locked_until = NULL WHERE id = $1', [admin.id]);
+  try {
+    if (await touchDevice(admin, req)) {
+      const when = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' });
+      const text = `У ваш обліковий запис адмінки ${admin.email} щойно увійшли з НОВОГО пристрою.\n\nЧас: ${when}\nIP: ${req.ip}\nБраузер: ${describeAgent(req.headers['user-agent'])}\n\nЯкщо це були ви — нічого робити не потрібно. Якщо ні — негайно змініть пароль і натисніть «Вийти на всіх інших пристроях» у розділі «Безпека».`;
+      sendEmail(admin.email, 'Новий вхід в адмінку', text).catch(() => {});
+      sendAlert({ title: `Вхід з нового пристрою: ${admin.email}`, text, email: false });
+    }
+  } catch (e) { console.error('[admin] перевірка пристрою:', e.message); }
   res.json(sessionBody(req, res, 'admin', signAdminToken(admin), { admin: publicAdmin(admin) }));
 }
 
@@ -79,7 +119,7 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     if (admin.locked_until && new Date(admin.locked_until) > new Date()) return lockedResponse(res, admin.locked_until);
     if (!valid) {
-      await registerFailure(admin.id);
+      await registerFailure(admin.id, req);
       return res.status(401).json({ error: 'Невірний email або пароль' });
     }
 
@@ -126,7 +166,7 @@ router.post('/login/mfa', loginLimiter, async (req, res) => {
       }
     }
     if (!ok) {
-      await registerFailure(admin.id);
+      await registerFailure(admin.id, req);
       return res.status(401).json({ error: 'Невірний код' });
     }
     await completeLogin(req, res, admin);
@@ -176,6 +216,13 @@ router.post('/change-password', requireAdminAuthBasic, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося змінити пароль' });
   }
+});
+
+// GET /api/admin/auth/devices — пристрої, з яких заходили в ваш обліковий запис.
+router.get('/devices', requireAdminAuthBasic, async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT user_agent, first_ip, last_ip, first_seen, last_seen FROM admin_devices WHERE admin_id = $1 ORDER BY last_seen DESC LIMIT 20', [req.admin.id]);
+  res.json({ devices: rows.map((r) => ({ ...r, label: describeAgent(r.user_agent) })) });
 });
 
 // POST /api/admin/auth/logout-all — завершує ВСІ сесії цього адміна, крім поточної.

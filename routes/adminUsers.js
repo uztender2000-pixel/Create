@@ -5,6 +5,7 @@ const { pool } = require('../db');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAdminRole } = require('../middleware/adminRole');
 const { mfaRequiredFor } = require('../middleware/adminAuth');
+const { sendAlert } = require('../services/alerts');
 const { sendEmail } = require('../services/emailClient');
 const { SHOP_NAME } = require('../services/brand');
 
@@ -119,10 +120,14 @@ router.post('/:id/unlock', async (req, res) => {
 // POST /api/admin/users/:id/reset-mfa — скидає 2FA (втрачено телефон і резервні коди) та завершує
 // всі його сесії. Якщо 2FA для ролі обов'язкова, людина налаштує її знову при наступному вході.
 router.post('/:id/reset-mfa', async (req, res) => {
-  const { rowCount } = await pool.query(
+  const { rows } = await pool.query(
     `UPDATE admin_users SET mfa_enabled = false, mfa_secret = NULL, mfa_backup_codes = '[]'::jsonb, mfa_last_step = NULL,
-            token_version = token_version + 1 WHERE id = $1`, [req.params.id]);
-  if (!rowCount) return res.status(404).json({ error: 'Not found' });
+            token_version = token_version + 1 WHERE id = $1 RETURNING email`, [req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'Not found' });
+  // Скидання 2FA — чутлива дія: повідомляємо і власника акаунта, і канали сповіщень.
+  const text = `Двофакторну автентифікацію облікового запису ${rows[0].email} скинув адміністратор ${req.admin.email}. Усі сесії цього користувача завершено.\n\nЯкщо ви цього не очікували — зверніться до власника.`;
+  sendEmail(rows[0].email, 'Двофакторну автентифікацію скинуто', text).catch(() => {});
+  sendAlert({ title: 'Скинуто 2FA', text, email: false });
   res.json({ ok: true });
 });
 

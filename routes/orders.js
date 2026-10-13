@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { pool } = require('../db');
 const { dispatchGroup } = require('../services/orderDispatcher');
+const rateLimit = require('express-rate-limit');
 const { requireAdminAuth, requirePermission } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -10,7 +11,13 @@ const router = express.Router();
 // Public on purpose: this is the guest checkout. It creates a single-row
 // order group, so it goes through exactly the same supplier dispatch as
 // a multi-item cart checkout.
-router.post('/', async (req, res) => {
+// Гостьове замовлення відкрите для всіх, тому обмежуємо спам: не більше 10 замовлень на годину з однієї адреси.
+const guestOrderLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Забагато замовлень з вашої адреси. Спробуйте пізніше або зверніться до нас.' },
+});
+
+router.post('/', guestOrderLimiter, async (req, res) => {
   try {
     const {
       product_id, quantity,

@@ -9,7 +9,8 @@ const { SHOP_NAME, SMS_BRAND } = require('../services/brand');
 const { getCurrentRow, getRowByVersion, withHtml, getTermsStatus, recordAcceptance } = require('../services/termsService');
 const { validatePassword } = require('../services/passwordPolicy');
 const jwt = require('jsonwebtoken');
-const { sessionBody } = require('../services/security');
+const { sessionBody, clearSession } = require('../services/security');
+const crypto = require('crypto');
 
 const router = express.Router();
 router.use(requireAuth); // every account route requires login
@@ -125,6 +126,8 @@ router.patch('/password', async (req, res) => {
     // Усі інші пристрої розлогінюються; цьому віддаємо свіжий токен.
     const newHash = await bcrypt.hash(newPassword, 12);
     const upd = await pool.query('UPDATE users SET password_hash = $1, token_version = token_version + 1 WHERE id = $2 RETURNING id, email, token_version', [newHash, req.user.id]);
+    sendEmail(rows[0].email, 'Ваш пароль змінено',
+      'Пароль до вашого облікового запису щойно змінено, а всі інші сесії завершено.\n\nЯкщо це були не ви — негайно скористайтесь відновленням пароля та зверніться до нас.').catch(() => {});
     res.json(sessionBody(req, res, 'user', signUserToken(upd.rows[0]), { ok: true }));
   } catch (err) {
     console.error(err);
@@ -437,6 +440,69 @@ router.post('/terms/accept', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося зберегти згоду' });
+  }
+});
+
+// GET /api/account/export — усі дані покупця одним JSON-файлом (право на доступ до своїх даних).
+router.get('/export', async (req, res) => {
+  try {
+    const id = req.user.id;
+    const q = (sql) => pool.query(sql, [id]).then((r) => r.rows);
+    const [profile, orders, cart, views, reviews, messages, acceptances] = await Promise.all([
+      q(`SELECT id, name, email, phone, email_verified, phone_verified, saved_delivery_method, saved_city, saved_branch,
+                saved_courier_address, terms_accepted_at, terms_version, created_at FROM users WHERE id = $1`),
+      q(`SELECT id, group_id, product_id, quantity, unit_price, customer_name, customer_phone, customer_city, np_city, np_branch,
+                delivery_method, courier_address, comment, status, ttn, created_at FROM orders WHERE user_id = $1 ORDER BY id`),
+      q('SELECT * FROM cart_items WHERE user_id = $1'),
+      q('SELECT * FROM product_views WHERE user_id = $1'),
+      q('SELECT * FROM product_reviews WHERE user_id = $1'),
+      q('SELECT * FROM support_messages WHERE user_id = $1'),
+      q('SELECT version, accepted_at, ip FROM terms_acceptances WHERE user_id = $1 ORDER BY accepted_at'),
+    ]);
+    const body = {
+      exported_at: new Date().toISOString(),
+      note: 'Це всі дані, пов\'язані з вашим обліковим записом. Паролі зберігаються лише у вигляді незворотного хешу й тут не показуються.',
+      profile: profile[0] || null, orders, cart, viewed_products: views, reviews, support_messages: messages, terms_acceptances: acceptances,
+    };
+    res.set('Content-Type', 'application/json; charset=utf-8');
+    res.set('Content-Disposition', 'attachment; filename="my-data.json"');
+    res.set('Cache-Control', 'no-store');
+    res.send(JSON.stringify(body, null, 2));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося підготувати дані' });
+  }
+});
+
+// POST /api/account/delete — { password, confirm: true }. Видаляє обліковий запис.
+// Замовлення за законом зберігаються (бухгалтерський облік), але відв'язуються від акаунта.
+router.post('/delete', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { password, confirm } = req.body;
+    if (confirm !== true) return res.status(400).json({ error: 'Підтвердіть видалення' });
+    const { rows } = await pool.query('SELECT email, password_hash FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Акаунт не знайдено' });
+    if (!(await bcrypt.compare(String(password || ''), rows[0].password_hash))) return res.status(401).json({ error: 'Невірний пароль' });
+
+    const email = rows[0].email;
+    await client.query('BEGIN');
+    await client.query('UPDATE orders SET user_id = NULL WHERE user_id = $1', [req.user.id]);
+    await client.query('DELETE FROM sms_log WHERE user_id = $1', [req.user.id]);
+    await client.query('INSERT INTO account_deletions (email_hash) VALUES ($1)', [crypto.createHash('sha256').update(email.toLowerCase()).digest('hex')]);
+    await client.query('DELETE FROM users WHERE id = $1', [req.user.id]);   // кошик, перегляди, відгуки, звернення, згоди — каскадно
+    await client.query('COMMIT');
+
+    clearSession(res, 'user');
+    sendEmail(email, 'Ваш обліковий запис видалено',
+      'Ми видалили ваш обліковий запис і пов\'язані з ним дані. Дані замовлень, які ми зобов\'язані зберігати за законом, залишаються без зв\'язку з акаунтом.\n\nЯкщо це були не ви — зверніться до нас.').catch(() => {});
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося видалити обліковий запис' });
+  } finally {
+    client.release();
   }
 });
 

@@ -417,6 +417,8 @@ router.post('/reset-password', async (req, res) => {
               reset_attempts = 0, token_version = token_version + 1 WHERE id = $2`,
       [passwordHash, user.id]
     );
+    sendEmail(String(email).toLowerCase(), 'Ваш пароль змінено',
+      'Пароль до вашого облікового запису щойно змінено через відновлення пароля, а всі сесії завершено.\n\nЯкщо це були не ви — зверніться до нас негайно.').catch(() => {});
 
     res.json({ ok: true });
   } catch (err) {
