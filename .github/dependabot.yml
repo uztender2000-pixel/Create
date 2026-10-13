@@ -1,0 +1,18 @@
+# Dependabot щотижня перевіряє залежності й сам створює pull request'и з оновленнями,
+# зокрема з виправленнями вразливостей. Додатково GitHub надсилає сповіщення про уразливі пакети
+# (Settings → Code security → «Dependabot alerts» — увімкніть).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
