@@ -538,6 +538,54 @@ async function initSchema() {
     ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_backup_codes JSONB NOT NULL DEFAULT '[]';
     ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS mfa_last_step BIGINT;
 
+    -- Помилки сервера (див. services/errorReporter.js): однакові помилки зводяться в один рядок із лічильником.
+    CREATE TABLE IF NOT EXISTS error_log (
+      id               BIGSERIAL PRIMARY KEY,
+      fingerprint      TEXT UNIQUE NOT NULL,
+      kind             TEXT NOT NULL,                  -- exception | http5xx | unhandled
+      message          TEXT NOT NULL,
+      stack            TEXT,
+      method           TEXT,
+      path             TEXT,
+      count            INTEGER NOT NULL DEFAULT 1,
+      first_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen        TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_alerted_at  TIMESTAMPTZ,
+      resolved         BOOLEAN NOT NULL DEFAULT false
+    );
+    CREATE INDEX IF NOT EXISTS idx_error_log_last_seen ON error_log (last_seen DESC);
+
+    -- Відомі пристрої адмінів: вхід з нового пристрою викликає сповіщення (див. routes/adminAuth.js).
+    CREATE TABLE IF NOT EXISTS admin_devices (
+      id          BIGSERIAL PRIMARY KEY,
+      admin_id    INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+      fingerprint TEXT NOT NULL,
+      user_agent  TEXT,
+      first_ip    TEXT,
+      last_ip     TEXT,
+      first_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (admin_id, fingerprint)
+    );
+
+    -- Інформаційні сторінки сайту (Доставка, Повернення, Про нас, Конфіденційність) — редагуються в адмінці.
+    CREATE TABLE IF NOT EXISTS site_pages (
+      slug        TEXT PRIMARY KEY,
+      title       TEXT NOT NULL,
+      content     TEXT NOT NULL,
+      published   BOOLEAN NOT NULL DEFAULT true,
+      sort_order  INTEGER NOT NULL DEFAULT 0,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by  TEXT
+    );
+
+    -- Підтвердження видалення акаунтів на вимогу покупця (без персональних даних — лише хеш email і дата).
+    CREATE TABLE IF NOT EXISTS account_deletions (
+      id          BIGSERIAL PRIMARY KEY,
+      email_hash  TEXT NOT NULL,
+      deleted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
     -- Облік використання ШІ-помічника по днях: денний ліміт повідомлень захищає від несподіваних витрат
     -- (лічильник у базі, а не в пам'яті, тож не скидається при перезапуску сервера).
     CREATE TABLE IF NOT EXISTS assistant_usage (

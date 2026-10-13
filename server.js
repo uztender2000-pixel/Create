@@ -34,12 +34,19 @@ const adminSectionTranslationsRouter = require('./routes/adminSectionTranslation
 const webhooksMydropRouter = require('./routes/webhooksMydrop');
 const termsRouter = require('./routes/terms');
 const sessionRouter = require('./routes/session');
+const pagesRouter = require('./routes/pages');
+const adminPagesRouter = require('./routes/adminPages');
+const { ensureDefaultPages } = require('./services/sitePages');
 const adminTermsRouter = require('./routes/adminTerms');
 const adminOwnerRouter = require('./routes/adminOwner');
 const { ensureInitialTerms } = require('./services/termsService');
 const adminAuditRouter = require('./routes/adminAudit');
 const { auditLog, purgeOldAuditLog } = require('./middleware/auditLog');
 const { allowedOrigins, cookieSessionsEnabled, csrfGuard } = require('./services/security');
+const adminErrorsRouter = require('./routes/adminErrors');
+const adminSecurityRouter = require('./routes/adminSecurity');
+const internalRouter = require('./routes/internal');
+const { trackServerErrors, errorHandler, notFoundApi, installProcessHandlers, purgeResolvedErrors } = require('./services/errorReporter');
 
 const app = express();
 
@@ -70,6 +77,7 @@ app.use(cors(allowedOrigins.length
   ? { origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)), credentials: true }
   : {}));
 app.use(csrfGuard);   // захист від підробки запитів для сесій у cookie
+app.use(trackServerErrors);   // кожна відповідь 5xx потрапляє в журнал помилок і сповіщення
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -127,9 +135,18 @@ app.use('/api/admin/section-translations', adminSectionTranslationsRouter);
 app.use('/api/webhooks/mydrop', webhooksMydropRouter);
 app.use('/api/terms', termsRouter);
 app.use('/api/session', sessionRouter);
+app.use('/api/pages', pagesRouter);
 app.use('/api/admin/terms', adminTermsRouter);
 app.use('/api/admin/owner', adminOwnerRouter);
 app.use('/api/admin/audit', adminAuditRouter);
+app.use('/api/admin/errors', adminErrorsRouter);
+app.use('/api/admin/pages', adminPagesRouter);
+app.use('/api/admin/security', adminSecurityRouter);
+app.use('/api/internal', internalRouter);
+
+// Завжди ПІСЛЯ всіх маршрутів: JSON-відповідь для невідомих адрес і єдиний обробник помилок (без витоку стека клієнту).
+app.use('/api', notFoundApi);
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 3000;
 
@@ -153,6 +170,7 @@ async function runSync(label) {
 }
 
 async function start() {
+  installProcessHandlers();   // unhandledRejection / uncaughtException → журнал помилок і сповіщення
   if (!process.env.JWT_SECRET) {
     console.error('FATAL: JWT_SECRET is not set. Registration and login will fail until you add it in Render → Environment.');
     process.exit(1);
@@ -168,7 +186,9 @@ async function start() {
   await seedInitialAdmin();
   await seedSuppliersFromEnv();
   await ensureInitialTerms();
+  await ensureDefaultPages();
   await purgeOldAuditLog().catch((e) => console.error('[audit] очищення:', e.message));
+  await purgeResolvedErrors().catch((e) => console.error('[errors] очищення:', e.message));
 
   // Start serving straight away. The first catalogue pull runs in the
   // background: with several suppliers it can take minutes, and the API
