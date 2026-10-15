@@ -443,12 +443,70 @@ router.post('/terms/accept', async (req, res) => {
   }
 });
 
+// ---------- Список бажаного ----------
+const MAX_WISHLIST = 200;
+
+// GET /api/account/wishlist/ids — лише id (щоб на сайті підсвітити «серденька»)
+router.get('/wishlist/ids', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT product_id FROM wishlist WHERE user_id = $1', [req.user.id]);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ids: rows.map((r) => String(r.product_id)) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося завантажити обране' });
+  }
+});
+
+// GET /api/account/wishlist — товари зі списку бажаного (новіші зверху)
+router.get('/wishlist', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.id, p.name, p.retail_price, p.picture_url, p.vendor, p.available
+         FROM wishlist w JOIN products p ON p.id = w.product_id
+        WHERE w.user_id = $1 ORDER BY w.created_at DESC LIMIT $2`, [req.user.id, MAX_WISHLIST]);
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося завантажити обране' });
+  }
+});
+
+// POST /api/account/wishlist/:productId — додати в обране
+router.post('/wishlist/:productId', async (req, res) => {
+  try {
+    if (!/^\d{1,15}$/.test(req.params.productId)) return res.status(400).json({ error: 'Некоректний товар' });
+    const exists = await pool.query('SELECT 1 FROM products WHERE id = $1', [req.params.productId]);
+    if (!exists.rows.length) return res.status(404).json({ error: 'Товар не знайдено' });
+    const count = await pool.query('SELECT COUNT(*)::int AS n FROM wishlist WHERE user_id = $1', [req.user.id]);
+    if (count.rows[0].n >= MAX_WISHLIST) return res.status(400).json({ error: `У списку бажаного може бути не більше ${MAX_WISHLIST} товарів` });
+    await pool.query('INSERT INTO wishlist (user_id, product_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.user.id, req.params.productId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося додати в обране' });
+  }
+});
+
+// DELETE /api/account/wishlist/:productId — прибрати з обраного
+router.delete('/wishlist/:productId', async (req, res) => {
+  try {
+    if (!/^\d{1,15}$/.test(req.params.productId)) return res.status(400).json({ error: 'Некоректний товар' });
+    await pool.query('DELETE FROM wishlist WHERE user_id = $1 AND product_id = $2', [req.user.id, req.params.productId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося прибрати з обраного' });
+  }
+});
+
 // GET /api/account/export — усі дані покупця одним JSON-файлом (право на доступ до своїх даних).
 router.get('/export', async (req, res) => {
   try {
     const id = req.user.id;
     const q = (sql) => pool.query(sql, [id]).then((r) => r.rows);
-    const [profile, orders, cart, views, reviews, messages, acceptances] = await Promise.all([
+    const [profile, orders, cart, views, reviews, messages, acceptances, wishlist] = await Promise.all([
       q(`SELECT id, name, email, phone, email_verified, phone_verified, saved_delivery_method, saved_city, saved_branch,
                 saved_courier_address, terms_accepted_at, terms_version, created_at FROM users WHERE id = $1`),
       q(`SELECT id, group_id, product_id, quantity, unit_price, customer_name, customer_phone, customer_city, np_city, np_branch,
@@ -458,11 +516,12 @@ router.get('/export', async (req, res) => {
       q('SELECT * FROM product_reviews WHERE user_id = $1'),
       q('SELECT * FROM support_messages WHERE user_id = $1'),
       q('SELECT version, accepted_at, ip FROM terms_acceptances WHERE user_id = $1 ORDER BY accepted_at'),
+      q('SELECT product_id, created_at FROM wishlist WHERE user_id = $1 ORDER BY created_at'),
     ]);
     const body = {
       exported_at: new Date().toISOString(),
       note: 'Це всі дані, пов\'язані з вашим обліковим записом. Паролі зберігаються лише у вигляді незворотного хешу й тут не показуються.',
-      profile: profile[0] || null, orders, cart, viewed_products: views, reviews, support_messages: messages, terms_acceptances: acceptances,
+      profile: profile[0] || null, orders, cart, viewed_products: views, reviews, support_messages: messages, terms_acceptances: acceptances, wishlist,
     };
     res.set('Content-Type', 'application/json; charset=utf-8');
     res.set('Content-Disposition', 'attachment; filename="my-data.json"');
