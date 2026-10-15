@@ -568,6 +568,15 @@ async function initSchema() {
       UNIQUE (admin_id, fingerprint)
     );
 
+    -- Список бажаного покупця («обране»).
+    CREATE TABLE IF NOT EXISTS wishlist (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      product_id BIGINT  NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (user_id, product_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_wishlist_user ON wishlist (user_id, created_at DESC);
+
     -- Інформаційні сторінки сайту (Доставка, Повернення, Про нас, Конфіденційність) — редагуються в адмінці.
     CREATE TABLE IF NOT EXISTS site_pages (
       slug        TEXT PRIMARY KEY,
