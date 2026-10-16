@@ -37,6 +37,7 @@ const sessionRouter = require('./routes/session');
 const pagesRouter = require('./routes/pages');
 const adminPagesRouter = require('./routes/adminPages');
 const adminOrdersExportRouter = require('./routes/adminOrdersExport');
+const adminSalesReportRouter = require('./routes/adminSalesReport');
 const { ensureDefaultPages } = require('./services/sitePages');
 const adminTermsRouter = require('./routes/adminTerms');
 const adminOwnerRouter = require('./routes/adminOwner');
@@ -143,6 +144,7 @@ app.use('/api/admin/audit', adminAuditRouter);
 app.use('/api/admin/errors', adminErrorsRouter);
 app.use('/api/admin/pages', adminPagesRouter);
 app.use('/api/admin/orders-export', adminOrdersExportRouter);
+app.use('/api/admin/sales-report', adminSalesReportRouter);
 app.use('/api/admin/security', adminSecurityRouter);
 app.use('/api/internal', internalRouter);
 
