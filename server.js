@@ -38,7 +38,6 @@ const pagesRouter = require('./routes/pages');
 const adminPagesRouter = require('./routes/adminPages');
 const adminOrdersExportRouter = require('./routes/adminOrdersExport');
 const adminSalesReportRouter = require('./routes/adminSalesReport');
-const { runWishlistAlerts } = require('./services/wishlistAlerts');
 const { ensureDefaultPages } = require('./services/sitePages');
 const adminTermsRouter = require('./routes/adminTerms');
 const adminOwnerRouter = require('./routes/adminOwner');
@@ -201,13 +200,6 @@ async function start() {
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
   runSync('boot');
-
-  // Сповіщення зі списку бажаного: щогодини на 25-й хвилині (після синхронізації каталогу о :00).
-  cron.schedule(process.env.WISHLIST_ALERTS_CRON || '25 * * * *', () => {
-    runWishlistAlerts()
-      .then((r) => { if (r && (r.sent || r.failed)) console.log('[wishlist-alerts]', JSON.stringify(r)); })
-      .catch((err) => console.error('[wishlist-alerts] помилка:', err.message));
-  });
 
   cron.schedule(process.env.FEED_SYNC_CRON || '0 * * * *', () => {
     console.log('[cron] running scheduled catalogue sync...');
