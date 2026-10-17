@@ -576,6 +576,11 @@ async function initSchema() {
       PRIMARY KEY (user_id, product_id)
     );
     CREATE INDEX IF NOT EXISTS idx_wishlist_user ON wishlist (user_id, created_at DESC);
+    -- Для сповіщень: ціна на момент додавання (показується в кабінеті), «пам'ятані» ціна й наявність (див. services/wishlistAlerts.js).
+    ALTER TABLE wishlist ADD COLUMN IF NOT EXISTS price_at_add NUMERIC;
+    ALTER TABLE wishlist ADD COLUMN IF NOT EXISTS price_snapshot NUMERIC;
+    ALTER TABLE wishlist ADD COLUMN IF NOT EXISTS available_snapshot BOOLEAN;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS wishlist_alerts BOOLEAN NOT NULL DEFAULT true;
 
     -- Інформаційні сторінки сайту (Доставка, Повернення, Про нас, Конфіденційність) — редагуються в адмінці.
     CREATE TABLE IF NOT EXISTS site_pages (
