@@ -1,7 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireAdminAuth, requirePermission } = require('../middleware/adminAuth');
-const { isEnabled, model, dailyLimit } = require('../services/assistant');
+const { isEnabled, model, dailyLimit, testConnection } = require('../services/assistant');
 
 const router = express.Router();
 router.use(requireAdminAuth, requirePermission('settings'));
@@ -51,6 +51,22 @@ router.get('/usage', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося завантажити використання помічника' });
   }
+});
+
+// POST /api/admin/assistant/test — перевірка зв'язку з Anthropic: мінімальний запит і зрозуміле пояснення, якщо щось не так.
+const HINTS = {
+  disabled: 'Додайте змінну ANTHROPIC_API_KEY (ключ із console.anthropic.com) у налаштуваннях сервера на Render.',
+  auth: 'Ключ не підходить. Створіть новий ключ у console.anthropic.com → API Keys і вставте його в ANTHROPIC_API_KEY без пробілів і лапок.',
+  billing: 'На рахунку Anthropic немає коштів. Поповніть баланс: console.anthropic.com → Plans & Billing.',
+  busy: 'Anthropic тимчасово перевантажений або вичерпано ліміт запитів. Зачекайте кілька хвилин.',
+  model: 'Назва моделі неправильна або недоступна для вашого ключа. Приберіть змінну ASSISTANT_MODEL (тоді діятиме стандартна) або вкажіть існуючу модель.',
+  network: 'Сервер не може зв\'язатися з api.anthropic.com. Спробуйте за хвилину.',
+  api: 'Anthropic відхилив запит. Точна причина — у повідомленні вище; перешліть його розробнику.',
+};
+router.post('/test', async (req, res) => {
+  const r = await testConnection();
+  res.set('Cache-Control', 'no-store');
+  res.json({ ...r, hint: r.ok ? null : (HINTS[r.code] || HINTS.api) });
 });
 
 module.exports = router;

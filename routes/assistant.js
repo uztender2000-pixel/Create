@@ -1,6 +1,7 @@
 const express = require('express');
 const { optionalAuth } = require('../middleware/auth');
 const { chat, isEnabled, AssistantError } = require('../services/assistant');
+const { captureException } = require('../services/errorReporter');
 
 const router = express.Router();
 
@@ -18,6 +19,11 @@ router.post('/chat', optionalAuth, async (req, res) => {
     res.json(out);
   } catch (err) {
     if (err instanceof AssistantError) {
+      // Покупцю — коротке пояснення, а власнику (журнал помилок і сповіщення) — точна причина від Anthropic.
+      if (err.status >= 500) {
+        res.locals.errorCaptured = true;
+        captureException(new Error(`Помічник ШІ [${err.code}]: ${err.message}`), { method: req.method, path: req.originalUrl });
+      }
       const text = err.code === 'limit' ? 'Помічник сьогодні дуже завантажений. Спробуйте завтра або напишіть нам через форму.'
         : err.code === 'bad_request' ? 'Напишіть повідомлення'
         : 'Помічник тимчасово недоступний. Спробуйте за хвилину або напишіть нам через форму.';
