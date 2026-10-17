@@ -14,7 +14,7 @@ const axios = require('axios');
 const { pool } = require('../db');
 const { SHOP_NAME } = require('./brand');
 
-const API_URL = 'https://api.anthropic.com/v1/messages';
+const API_URL = process.env.ANTHROPIC_API_URL || 'https://api.anthropic.com/v1/messages';   // змінна — лише для тестів
 const API_VERSION = '2023-06-01';
 const DEFAULT_MODEL = 'claude-sonnet-5-5';
 const MAX_TOOL_ROUNDS = 5;
@@ -26,6 +26,11 @@ class AssistantError extends Error {
 }
 
 const isEnabled = () => Boolean(process.env.ANTHROPIC_API_KEY);
+
+// Деякі (особливо нові) моделі Claude не приймають параметр temperature й відповідають помилкою 400.
+// Спершу пробуємо з ним (щоб відповіді були стабільнішими), а якщо модель його не приймає — запам'ятовуємо
+// і далі надсилаємо запити без нього. Примусово вимкнути: ASSISTANT_TEMPERATURE=off.
+let omitTemperature = String(process.env.ASSISTANT_TEMPERATURE || '').toLowerCase() === 'off';
 const model = () => process.env.ASSISTANT_MODEL || DEFAULT_MODEL;
 const dailyLimit = () => Math.max(1, parseInt(process.env.ASSISTANT_DAILY_LIMIT, 10) || 300);
 
@@ -251,7 +256,7 @@ async function recordUsage(inputTokens, outputTokens) {
   ).catch((e) => console.error('[assistant] не вдалося записати використання:', e.message));
 }
 
-async function callClaude(body) {
+async function callClaude(body, allowRetry = true) {
   try {
     const res = await axios.post(API_URL, body, {
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': API_VERSION, 'content-type': 'application/json' },
@@ -261,14 +266,37 @@ async function callClaude(body) {
     if (res.status >= 200 && res.status < 300) return res.data;
     const detail = res.data && res.data.error ? `${res.data.error.type}: ${res.data.error.message}` : `HTTP ${res.status}`;
     console.error('[assistant] помилка API:', res.status, detail);       // ключ у лог не потрапляє
-    if (res.status === 401 || res.status === 403) throw new AssistantError('Невірний ключ Anthropic API', 'auth', 503);
-    if (res.status === 429 || res.status === 529) throw new AssistantError('Модель зараз перевантажена', 'busy', 503);
-    if (res.status === 400 && /credit|balance|billing/i.test(detail)) throw new AssistantError('Недостатньо коштів на рахунку API', 'billing', 503);
-    throw new AssistantError('Помилка моделі', 'api', 502);
+
+    // Модель не приймає temperature → повторюємо без нього й запам'ятовуємо.
+    if (res.status === 400 && body.temperature !== undefined && /temperature/i.test(detail) && allowRetry) {
+      omitTemperature = true;
+      const { temperature, ...rest } = body;
+      return callClaude(rest, false);
+    }
+    if (res.status === 401 || res.status === 403) throw new AssistantError(`Невірний ключ Anthropic API або немає доступу (HTTP ${res.status}): ${detail}`, 'auth', 503);
+    if (res.status === 429 || res.status === 529) throw new AssistantError(`Модель зараз перевантажена або вичерпано ліміт запитів (HTTP ${res.status}): ${detail}`, 'busy', 503);
+    if (res.status === 400 && /credit|balance|billing/i.test(detail)) throw new AssistantError(`Недостатньо коштів на рахунку Anthropic API: ${detail}`, 'billing', 503);
+    if (res.status === 404) throw new AssistantError(`Модель «${body.model}» не знайдено або недоступна для цього ключа (HTTP 404): ${detail}. Перевірте змінну ASSISTANT_MODEL.`, 'model', 503);
+    throw new AssistantError(`Помилка моделі «${body.model}» (HTTP ${res.status}): ${detail}`, 'api', 502);
   } catch (err) {
     if (err instanceof AssistantError) throw err;
     console.error('[assistant] з\'єднання з API не вдалось:', err.code || err.message);
-    throw new AssistantError('Немає зв\'язку з моделлю', 'network', 503);
+    throw new AssistantError(`Немає зв'язку з Anthropic API (${err.code || err.message})`, 'network', 503);
+  }
+}
+
+// Перевірка зв'язку для адмінки: мінімальний запит (кілька токенів). Повертає { ok, ... } і НІКОЛИ не кидає помилку.
+async function testConnection() {
+  if (!isEnabled()) return { ok: false, code: 'disabled', message: 'Змінну ANTHROPIC_API_KEY не задано на сервері — помічник вимкнений.' };
+  const started = Date.now();
+  try {
+    const body = { model: model(), max_tokens: 16, messages: [{ role: 'user', content: 'Відповідай одним словом: ок' }] };
+    if (!omitTemperature) body.temperature = 0.4;
+    const data = await callClaude(body);
+    const text = (Array.isArray(data.content) ? data.content : []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+    return { ok: true, model: model(), ms: Date.now() - started, reply: text.slice(0, 80), temperatureOmitted: omitTemperature };
+  } catch (err) {
+    return { ok: false, model: model(), code: err.code || 'unknown', status: err.status || null, message: err.message };
   }
 }
 
@@ -299,7 +327,7 @@ async function chat({ messages, user, productId }) {
   let inTokens = 0; let outTokens = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-    const data = await callClaude({ model: model(), max_tokens: 900, temperature: 0.4, system, tools: TOOLS, messages: convo });
+    const data = await callClaude({ model: model(), max_tokens: 900, ...(omitTemperature ? {} : { temperature: 0.4 }), system, tools: TOOLS, messages: convo });
     inTokens += (data.usage?.input_tokens || 0) + (data.usage?.cache_read_input_tokens || 0) + (data.usage?.cache_creation_input_tokens || 0);
     outTokens += data.usage?.output_tokens || 0;
 
@@ -331,4 +359,4 @@ async function chat({ messages, user, productId }) {
   return { reply: 'Запит вийшов занадто складним. Спробуйте сформулювати простіше або напишіть менеджеру.', cards, ticketCreated: ctx.ticketCreated };
 }
 
-module.exports = { chat, isEnabled, model, dailyLimit, AssistantError, normalizeMessages, tokenize, stem, TOOLS };
+module.exports = { chat, testConnection, isEnabled, model, dailyLimit, AssistantError, normalizeMessages, tokenize, stem, TOOLS };
