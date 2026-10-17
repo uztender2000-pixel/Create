@@ -462,14 +462,27 @@ router.get('/wishlist/ids', async (req, res) => {
 router.get('/wishlist', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT p.id, p.name, p.retail_price, p.picture_url, p.vendor, p.available
+      `SELECT p.id, p.name, p.retail_price, p.picture_url, p.vendor, p.available, w.price_at_add
          FROM wishlist w JOIN products p ON p.id = w.product_id
         WHERE w.user_id = $1 ORDER BY w.created_at DESC LIMIT $2`, [req.user.id, MAX_WISHLIST]);
+    const u = await pool.query('SELECT wishlist_alerts, email_verified FROM users WHERE id = $1', [req.user.id]);
     res.set('Cache-Control', 'no-store');
-    res.json({ items: rows });
+    res.json({ items: rows, alerts: u.rows[0] ? u.rows[0].wishlist_alerts : true, email_verified: Boolean(u.rows[0] && u.rows[0].email_verified) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Не вдалося завантажити обране' });
+  }
+});
+
+// PUT /api/account/wishlist/alerts — { enabled: boolean }: увімкнути/вимкнути листи про ціну й наявність
+router.put('/wishlist/alerts', async (req, res) => {
+  try {
+    if (typeof req.body.enabled !== 'boolean') return res.status(400).json({ error: 'Некоректне значення' });
+    await pool.query('UPDATE users SET wishlist_alerts = $2 WHERE id = $1', [req.user.id, req.body.enabled]);
+    res.json({ ok: true, enabled: req.body.enabled });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Не вдалося зберегти' });
   }
 });
 
@@ -481,7 +494,11 @@ router.post('/wishlist/:productId', async (req, res) => {
     if (!exists.rows.length) return res.status(404).json({ error: 'Товар не знайдено' });
     const count = await pool.query('SELECT COUNT(*)::int AS n FROM wishlist WHERE user_id = $1', [req.user.id]);
     if (count.rows[0].n >= MAX_WISHLIST) return res.status(400).json({ error: `У списку бажаного може бути не більше ${MAX_WISHLIST} товарів` });
-    await pool.query('INSERT INTO wishlist (user_id, product_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.user.id, req.params.productId]);
+    // Запам'ятовуємо ціну й наявність на момент додавання — від них відраховуємо «подешевшало / знову в наявності».
+    await pool.query(
+      `INSERT INTO wishlist (user_id, product_id, price_at_add, price_snapshot, available_snapshot)
+       SELECT $1, id, retail_price, retail_price, available FROM products WHERE id = $2
+       ON CONFLICT DO NOTHING`, [req.user.id, req.params.productId]);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
